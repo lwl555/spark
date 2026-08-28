@@ -344,7 +344,7 @@ export function parseSparkFriends(
       realDays: info.real_days ?? info.days ?? 0,
       level: info.level ?? "",
       state: info.state ?? 0,
-      recoverDdl: info.recover_ddl ?? 0,
+      recoverDdl: info.recover_ddl ?? info.recover_days ?? 0,
       expireTime: f.expire,
       sparkJson: JSON.stringify(info).slice(0, 500),
     });
@@ -395,6 +395,7 @@ export async function fetchUserProfiles(
 export function freshAnonymousJar(): CookieJar {
   return new CookieJar(BASE_COOKIES);
 }
+
 
 
 
