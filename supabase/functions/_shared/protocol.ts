@@ -75,7 +75,7 @@ export async function genQrCode(jar: CookieJar) {
 
 // ---------- 2. 轮询扫码状态 ----------
 export async function pollQr(jar: CookieJar, token: string) {
-  // check 模板 URL 参数保持原样，只替换 post 中的 token
+  // check 模板 URL 参数保持原样（含新鲜 a_bogus/msToken），只替换 post 中的 token
   const params = queryOf(CHECK_TEMPLATE_URL);
   const checkUrl = "https://login.douyin.com/passport/web/check_qrconnect/?" + new URLSearchParams(params).toString();
   const post = CHECK_POST.replace(/token=[^&]+/, `token=${encodeURIComponent(token)}`);

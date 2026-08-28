@@ -112,3 +112,27 @@ create policy "own settings" on user_settings
   for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
 -- 服务端（Edge Function 用 service role）不受 RLS 限制，可读写所有用户数据
+
+-- ============================================================
+-- 2026-08-29 新增：登录排队 + 二维码列（配合 GitHub Actions 真浏览器登录）
+-- ============================================================
+alter table login_states add column if not exists qrcode text;
+
+-- 登录排队表：用户点「绑定抖音号」→ 排入队列 → Actions worker 认领处理
+create table if not exists login_requests (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  status text not null default 'pending',  -- pending / processing / done / failed / canceled
+  token text,                              -- 对应的 login_states.token
+  error text,
+  claimed_at timestamptz,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists idx_login_req_pending on login_requests(status, created_at);
+create index if not exists idx_login_req_user on login_requests(user_id);
+alter table login_requests enable row level security;
+create policy "own login requests" on login_requests
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
+create policy "own login states read" on login_states
+  for select using (auth.uid() = user_id);

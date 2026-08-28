@@ -1,0 +1,9 @@
+﻿{
+  "name": "spark-login-worker",
+  "private": true,
+  "type": "module",
+  "description": "GitHub Actions 真浏览器抖音扫码登录 worker",
+  "dependencies": {
+    "playwright": "^1.49.0"
+  }
+}

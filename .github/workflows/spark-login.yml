@@ -1,0 +1,53 @@
+﻿# 抖音扫码登录：GitHub Actions 真浏览器（免费额度，无需服务器）
+# 触发方式：用户点网站“绑定抖音号”→ login_requests 排队 → 本任务处理；
+#           也可手动 gh workflow run spark-login.yml --repo lwl555/spark
+name: spark-login
+
+on:
+  workflow_dispatch:
+    inputs:
+      user_id:
+        description: "指定用户ID（留空则处理排队请求）"
+        required: false
+        default: ""
+  schedule:
+    - cron: "*/2 * * * *"
+
+concurrency:
+  group: spark-login
+  cancel-in-progress: false
+
+jobs:
+  browser-login:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: 安装 Playwright 与 Chromium
+        run: |
+          cd worker
+          npm ci
+          npx playwright install --with-deps chromium
+          sudo apt-get install -y xvfb || true
+
+      - name: 运行登录 Worker（真浏览器）
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          TARGET_USER_ID: ${{ inputs.user_id }}
+        run: |
+          cd worker
+          xvfb-run -a node login-worker.mjs
+
+      - name: 上传调试截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: login-debug
+          path: worker/*.png
+          if-no-files-found: ignore

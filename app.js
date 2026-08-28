@@ -246,14 +246,26 @@ function showBanner(text) {
 $("bind-btn").addEventListener("click", startQr);
 $("qr-close").addEventListener("click", closeQr);
 $("qr-cancel").addEventListener("click", closeQr);
+let qrStartTs = 0;
+function showQr(b64, token) {
+  $("qr-img").src = "data:image/png;base64," + b64;
+  $("qr-img").classList.remove("hidden");
+  $("qr-status").textContent = "用抖音 App 扫码并确认";
+}
 async function startQr() {
   try {
+    qrStartTs = Date.now();
     const r = await fn("login-qr");
-    $("qr-img").src = "data:image/png;base64," + r.qrcodeBase64;
-    $("qr-status").textContent = "等待扫码…";
     $("qr-modal").classList.remove("hidden");
     clearInterval(qrTimer);
-    qrTimer = setInterval(() => pollQr(r.token), 3000);
+    if (r.queued) {
+      $("qr-img").classList.add("hidden");
+      $("qr-status").textContent = "正在启动登录环境，请稍候（约 1-2 分钟）…";
+      qrTimer = setInterval(() => pollQr(""), 3000);
+    } else {
+      showQr(r.qrcodeBase64, r.token);
+      qrTimer = setInterval(() => pollQr(r.token), 3000);
+    }
   } catch (e) {
     handleErr(e);
   }
@@ -261,7 +273,12 @@ async function startQr() {
 async function pollQr(token) {
   try {
     const r = await fn("login-poll", { token });
-    if (r.status === "bound") {
+    if (r.status === "qr_ready") {
+      showQr(r.qrcodeBase64, r.token);
+      // 二维码刚出现时重置计时，用新 token 继续轮询
+      if (qrTimer) clearInterval(qrTimer);
+      qrTimer = setInterval(() => pollQr(r.token), 3000);
+    } else if (r.status === "bound") {
       clearInterval(qrTimer);
       $("qr-status").textContent = "✅ 绑定成功：" + (r.nickname || "抖音号");
       toast("绑定成功，正在同步火花…", "ok");
@@ -271,21 +288,25 @@ async function pollQr(token) {
         if (sessions.length) sessions[sessions.length - 1].click();
         loadAll();
       }, 1200);
-    } else if (r.status === "scanned") {
-      $("qr-status").textContent = "已扫码，请在手机上确认…";
-    } else if (r.status === "confirmed") {
-      $("qr-status").textContent = "已确认，正在完成绑定…";
+    } else if (r.status === "queued") {
+      if (Date.now() - qrStartTs > 300000) {
+        $("qr-status").textContent = "启动较慢，请再等一会儿，或关闭后重新点击绑定";
+      }
+    } else if (r.status === "scanned_ok") {
+      $("qr-status").textContent = "已扫码，正在完成绑定…";
     } else if (r.status === "expired") {
       clearInterval(qrTimer);
-      $("qr-status").textContent = "二维码已过期，请重新生成";
-      toast("二维码已过期，请重新生成", "err");
+      $("qr-status").textContent = "二维码已过期，请重新点击绑定";
+      toast("二维码已过期，请重新绑定", "err");
+    } else if (r.status === "failed") {
+      clearInterval(qrTimer);
+      $("qr-status").textContent = "登录失败：" + (r.error || "请重新尝试");
+      toast("登录失败，请重新绑定", "err");
     } else if (r.status === "canceled") {
       clearInterval(qrTimer);
-      $("qr-status").textContent = "已取消";
-    } else if (r.errorCode === 7) {
-      clearInterval(qrTimer);
-      $("qr-status").textContent = "登录被抖音风控拦截，请稍后重新生成二维码";
-      toast("登录被风控拦截，请稍后重试", "err");
+      $("qr-status").textContent = "已取消，请重新点击绑定";
+    } else if (r.status === "none") {
+      // 尚无任务：保持当前提示，继续轮询
     }
     // 其他未知状态：继续轮询，不中断
   } catch (e) {
@@ -337,4 +358,5 @@ function onLogin(user) {
   // 打开页面自动跑一次检查（自动续火花）
   checkAll();
 }
+
 

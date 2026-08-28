@@ -13,3 +13,7 @@ tools/
 .DS_Store
 Thumbs.db
 supabase/.temp/
+
+# GH Actions 登录 worker 依赖
+worker/node_modules/
+

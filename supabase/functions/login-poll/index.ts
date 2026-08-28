@@ -1,5 +1,6 @@
-﻿// 轮询抖音扫码状态；确认后自动创建绑定会话
-import { CookieJar, pollQr, fetchUserProfiles } from "../_shared/protocol.ts";
+﻿// 轮询登录状态：二维码/扫码结果来自 GitHub Actions worker 写入的 login_states
+// scanned_ok → 用完整 cookies 创建/更新 douyin_sessions → bound
+import { CookieJar, fetchUserProfiles } from "../_shared/protocol.ts";
 import { handleOptions, json, rest, uidFromAuth } from "../_shared/db.ts";
 
 Deno.serve(async (req: Request) => {
@@ -7,70 +8,88 @@ Deno.serve(async (req: Request) => {
   if (opt) return opt;
   try {
     const uid = uidFromAuth(req);
-    const body = await req.json().catch(() => ({}));
-    const token = String(body.token || "");
-    if (!token) return json({ ok: false, error: "缺少 token" }, 400);
 
+    // 1) 最新一条 login_states（worker 写入）
     const rows = await rest(
       "GET",
-      `login_states?user_id=eq.${uid}&token=eq.${encodeURIComponent(token)}&select=*`,
+      `login_states?user_id=eq.${uid}&order=created_at.desc&limit=1&select=*`,
     ) as any[];
     const st = rows?.[0];
-    if (!st) return json({ ok: false, error: "二维码不存在或已失效，请重新生成" }, 404);
-    if (st.status === "bound") {
-      return json({ ok: true, status: "bound", sessionId: st.session_id, nickname: st.nickname });
-    }
-    if (st.status === "expired" || st.status === "canceled") {
-      return json({ ok: true, status: st.status });
-    }
 
-    const jar = new CookieJar(st.cookies_json || {});
-    const r = await pollQr(jar, token);
-    const now = new Date().toISOString();
-
-    // 确认成功判定：抖音可能返回 status=confirmed、或只带 sec_uid/redirect_url、或 3xx 跳转 + Set-Cookie
-    const confirmed = r.status === "confirmed" || Boolean(r.secUid) || Boolean(r.redirectUrl) || (r.redirected && r.hasSession);
-    if (confirmed) {
-      // 扫码确认：拉取本人资料并创建会话
-      let nickname = "";
-      let avatar = "";
-      let douyinUid = "";
-      if (r.secUid) {
-        try {
-          const prof = await fetchUserProfiles(jar, [r.secUid]);
-          const p = prof[r.secUid];
-          if (p) { nickname = p.nickname; avatar = p.avatarUrl; douyinUid = p.uid; }
-        } catch { /* 资料失败不阻塞 */ }
+    if (st) {
+      if (st.status === "pending") {
+        return json({ ok: true, status: "qr_ready", token: st.token, qrcodeBase64: st.qrcode || "" });
       }
-      const sess = await rest("POST", "douyin_sessions", {
-        user_id: uid,
-        douyin_uid: douyinUid || "",
-        douyin_sec_uid: r.secUid,
-        nickname,
-        avatar_url: avatar,
-        cookies_json: jar.toJSON(),
-        status: "active",
-        last_synced_at: now,
-      }) as any[];
-      const sessionId = sess?.[0]?.id;
-      await rest("PATCH", `login_states?id=eq.${st.id}`, {
-        status: "bound",
-        sec_uid: r.secUid,
-        session_id: sessionId,
-        nickname,
-        cookies_json: jar.toJSON(),
-        updated_at: now,
-      });
-      return json({ ok: true, status: "bound", sessionId, nickname, secUid: r.secUid });
+      if (st.status === "scanned_ok") {
+        const jar = new CookieJar(st.cookies_json || {});
+        if (!jar.map.sessionid && !jar.map.sid_tt) {
+          return json({ ok: true, status: "failed", error: "登录 cookie 无效，请重新绑定" });
+        }
+        const now = new Date().toISOString();
+        let nickname = st.nickname || "";
+        let avatar = "";
+        // 有 sec_uid 时尽量补昵称/头像
+        if (st.sec_uid) {
+          try {
+            const prof = await fetchUserProfiles(jar, [st.sec_uid]);
+            const p = prof[st.sec_uid];
+            if (p) { nickname = p.nickname || nickname; avatar = p.avatarUrl || ""; }
+          } catch { /* 资料失败不阻塞 */ }
+        }
+        // 已有活动会话 → 更新 cookie（支持换号重绑）；否则新建
+        const dup = await rest(
+          "GET",
+          `douyin_sessions?user_id=eq.${uid}&status=eq.active&select=id`,
+        ).catch(() => []) as any[];
+        let sessionId = dup?.[0]?.id || "";
+        if (sessionId) {
+          await rest("PATCH", `douyin_sessions?id=eq.${sessionId}`, {
+            cookies_json: jar.toJSON(),
+            nickname,
+            avatar_url: avatar,
+            douyin_sec_uid: st.sec_uid || "",
+            updated_at: now,
+            last_synced_at: now,
+          });
+        } else {
+          const sess = await rest("POST", "douyin_sessions", {
+            user_id: uid,
+            douyin_uid: "",
+            douyin_sec_uid: st.sec_uid || "",
+            nickname,
+            avatar_url: avatar,
+            cookies_json: jar.toJSON(),
+            status: "active",
+            last_synced_at: now,
+          }) as any[];
+          sessionId = sess?.[0]?.id;
+        }
+        await rest("PATCH", `login_states?id=eq.${st.id}`, {
+          status: "bound",
+          session_id: sessionId,
+          nickname,
+          updated_at: now,
+        });
+        return json({ ok: true, status: "bound", sessionId, nickname });
+      }
+      if (st.status === "bound") {
+        return json({ ok: true, status: "bound", sessionId: st.session_id, nickname: st.nickname || "" });
+      }
+      if (st.status === "expired") return json({ ok: true, status: "expired" });
+      if (st.status === "failed") return json({ ok: true, status: "failed", error: st.error || "登录失败，请重新绑定" });
     }
 
-    await rest("PATCH", `login_states?id=eq.${st.id}`, {
-      status: r.status,
-      sec_uid: r.secUid || st.sec_uid || null,
-      cookies_json: jar.toJSON(),
-      updated_at: now,
-    });
-    return json({ ok: true, status: r.status, description: r.description || "", errorCode: r.errorCode });
+    // 2) 还没有 login_states → 看排队进度
+    const reqs = await rest(
+      "GET",
+      `login_requests?user_id=eq.${uid}&order=created_at.desc&limit=1&select=status,error`,
+    ).catch(() => []) as any[];
+    const rq = reqs?.[0];
+    if (!rq) return json({ ok: true, status: "none" });
+    if (rq.status === "pending" || rq.status === "processing") return json({ ok: true, status: "queued" });
+    if (rq.status === "failed") return json({ ok: true, status: "failed", error: rq.error || "登录失败，请重新尝试" });
+    if (rq.status === "canceled") return json({ ok: true, status: "canceled" });
+    return json({ ok: true, status: "none" });
   } catch (e) {
     return json({ ok: false, error: String((e as Error).message || e) }, 400);
   }
