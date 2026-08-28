@@ -91,7 +91,11 @@ async function api(table, opts = {}) {
 }
 async function fn(name, body) {
   const { data, error } = await sb.functions.invoke(name, { body: body || {} });
-  if (error) throw (error.context && error.context.error) ? new Error(error.context.error) : error;
+  if (error) {
+    const ctx = error.context || {};
+    const msg = (ctx.data && ctx.data.error) || ctx.error || error.message || String(error);
+    throw new Error(msg);
+  }
   if (data && data.ok === false) throw new Error(data.error || name + " 调用失败");
   return data;
 }
@@ -328,3 +332,4 @@ function onLogin(user) {
   // 打开页面自动跑一次检查（自动续火花）
   checkAll();
 }
+
