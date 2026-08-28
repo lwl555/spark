@@ -282,7 +282,12 @@ async function pollQr(token) {
     } else if (r.status === "canceled") {
       clearInterval(qrTimer);
       $("qr-status").textContent = "已取消";
+    } else if (r.errorCode === 7) {
+      clearInterval(qrTimer);
+      $("qr-status").textContent = "登录被抖音风控拦截，请稍后重新生成二维码";
+      toast("登录被风控拦截，请稍后重试", "err");
     }
+    // 其他未知状态：继续轮询，不中断
   } catch (e) {
     clearInterval(qrTimer);
     $("qr-status").textContent = "轮询失败：" + (e.message || "请重试");

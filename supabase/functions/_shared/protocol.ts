@@ -87,17 +87,23 @@ export async function pollQr(jar: CookieJar, token: string) {
       Origin: "https://www.douyin.com", Cookie: jar.str(),
     },
     body: post,
+    redirect: "manual",
   });
   jar.absorbSetCookie(res);
-  const j = await res.json().catch(() => null);
-  const data = j?.data || {};
+  const redirected = res.status >= 300 && res.status < 400;
+  const txt = await res.text();
+  let parsed: any = null;
+  try { parsed = JSON.parse(txt); } catch { /* 302/非 JSON 时忽略 */ }
+  const data = parsed?.data || {};
   const status: string = data.status || "";
   return {
-    status, // new / scanned / confirmed / expired / canceled
+    status, // new / scanned / confirmed / expired / canceled / ""
     description: data.description || "",
     secUid: data.sec_uid || "",
+    redirectUrl: data.redirect_url || "",
     errorCode: data.error_code ?? null,
     hasSession: Boolean(jar.map.sessionid || jar.map.sid_tt),
+    redirected, // 3xx 跳转（确认成功通常伴随跳转 + Set-Cookie）
   };
 }
 

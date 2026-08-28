@@ -28,7 +28,9 @@ Deno.serve(async (req: Request) => {
     const r = await pollQr(jar, token);
     const now = new Date().toISOString();
 
-    if (r.status === "confirmed" && jar.map.sessionid) {
+    // 确认成功判定：抖音可能返回 status=confirmed、或只带 sec_uid/redirect_url、或 3xx 跳转 + Set-Cookie
+    const confirmed = r.status === "confirmed" || Boolean(r.secUid) || Boolean(r.redirectUrl) || (r.redirected && r.hasSession);
+    if (confirmed) {
       // 扫码确认：拉取本人资料并创建会话
       let nickname = "";
       let avatar = "";
@@ -68,7 +70,7 @@ Deno.serve(async (req: Request) => {
       cookies_json: jar.toJSON(),
       updated_at: now,
     });
-    return json({ ok: true, status: r.status, description: r.description || "" });
+    return json({ ok: true, status: r.status, description: r.description || "", errorCode: r.errorCode });
   } catch (e) {
     return json({ ok: false, error: String((e as Error).message || e) }, 400);
   }
