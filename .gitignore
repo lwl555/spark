@@ -1,0 +1,15 @@
+﻿# 密钥与身份数据（绝不入库）
+supabase/functions/_shared/templates.ts
+*.env
+.env*
+
+# 本地工具与抓包
+deploy/
+tools/
+*.bin
+*.pem
+
+# 系统文件
+.DS_Store
+Thumbs.db
+supabase/.temp/

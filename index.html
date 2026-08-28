@@ -1,0 +1,122 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#121212">
+<title>抖音火花助手 🔥 自动续火花</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔥</text></svg>">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <!-- 登录页 -->
+  <section id="auth-view" class="view hidden">
+    <div class="auth-card">
+      <div class="logo">🔥</div>
+      <h1>抖音火花助手</h1>
+      <p class="subtitle">自动检测火花剩余有效期，快灭时自动续，永不断火</p>
+      <div id="auth-msg" class="msg hidden"></div>
+      <form id="auth-form" autocomplete="on">
+        <label class="field">
+          <span>邮箱</span>
+          <input type="email" id="auth-email" placeholder="you@example.com" required>
+        </label>
+        <label class="field">
+          <span>密码</span>
+          <input type="password" id="auth-pass" placeholder="至少 6 位" minlength="6" required>
+        </label>
+        <button type="submit" id="auth-submit" class="btn primary">登录 / 注册</button>
+      </form>
+      <button id="magic-link" class="btn ghost">用邮箱验证码登录</button>
+      <p class="hint">首次登录自动注册账号。注册后即可扫码绑定抖音号。</p>
+    </div>
+  </section>
+
+  <!-- 主面板 -->
+  <section id="main-view" class="view hidden">
+    <header class="topbar">
+      <div class="brand">🔥 火花助手</div>
+      <div class="topbar-right">
+        <button id="check-all" class="btn small">立即检查</button>
+        <button id="logout" class="btn ghost small">退出</button>
+      </div>
+    </header>
+
+    <div id="banner" class="banner hidden"></div>
+
+    <main class="container">
+      <!-- 抖音号 -->
+      <div class="section">
+        <div class="section-head">
+          <h2>我的抖音号</h2>
+          <button id="bind-btn" class="btn primary small">＋ 绑定抖音号</button>
+        </div>
+        <div id="sessions" class="sessions"></div>
+      </div>
+
+      <!-- 好友火花 -->
+      <div class="section">
+        <div class="section-head">
+          <h2>好友火花</h2>
+          <span id="friends-summary" class="muted"></span>
+        </div>
+        <div id="friends" class="friends"></div>
+        <div id="friends-empty" class="empty hidden">
+          <p>还没有好友数据</p>
+          <p class="muted">绑定抖音号后点「立即检查」拉取火花状态</p>
+        </div>
+      </div>
+
+      <!-- 设置 -->
+      <div class="section">
+        <div class="section-head"><h2>自动续火花设置</h2></div>
+        <div id="settings-box" class="settings">
+          <label class="switch-row">
+            <span>
+              <b>自动续火花</b>
+              <small>到期前自动给好友发消息，无需手动操作</small>
+            </span>
+            <input type="checkbox" id="set-auto">
+          </label>
+          <label class="field">
+            <span>提前天数（剩余 ≤ 该天数时发送）</span>
+            <input type="number" id="set-ddl" min="1" max="30" value="3">
+          </label>
+          <label class="field">
+            <span>续火花消息内容</span>
+            <input type="text" id="set-msg" maxlength="40" value="火花要灭了，续一下🔥">
+          </label>
+          <button id="save-settings" class="btn primary">保存设置</button>
+        </div>
+      </div>
+
+      <!-- 历史 -->
+      <div class="section">
+        <div class="section-head"><h2>发送记录</h2></div>
+        <div id="history" class="history"></div>
+        <div id="history-empty" class="empty hidden"><p class="muted">暂无发送记录</p></div>
+      </div>
+    </main>
+  </section>
+</div>
+
+<!-- 扫码弹窗 -->
+<div id="qr-modal" class="modal hidden">
+  <div class="modal-box">
+    <button class="modal-close" id="qr-close">✕</button>
+    <h2>用抖音 App 扫码绑定</h2>
+    <p class="muted">打开抖音 → 右上角扫一扫</p>
+    <div id="qr-wrap" class="qr-wrap"><img id="qr-img" alt="二维码"></div>
+    <p id="qr-status" class="qr-status">等待扫码…</p>
+    <button id="qr-cancel" class="btn ghost">取消</button>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="config.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="app.js"></script>
+</body>
+</html>

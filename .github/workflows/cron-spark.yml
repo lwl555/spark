@@ -1,0 +1,23 @@
+﻿# 定时触发 Supabase daily-run：每 6 小时自动检查所有用户火花并续火花
+# 密钥存 GitHub Secrets（SUPABASE_URL / SUPABASE_ANON_KEY）
+name: spark-daily
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 触发自动续火花任务
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+        run: |
+          curl -sS -X POST "$SUPABASE_URL/functions/v1/daily-run" \
+            -H "Authorization: Bearer $SUPABASE_ANON_KEY" \
+            -H "apikey: $SUPABASE_ANON_KEY" \
+            -H "Content-Type: application/json" \
+            -d '{}'
