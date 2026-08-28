@@ -10,8 +10,8 @@ const SUPABASE_URL = process.env.SUPABASE_URL || "";
 const SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "";
 const TARGET_USER_ID = (process.env.TARGET_USER_ID || "").trim();
 
-const QR_WAIT_MS = 35000;      // 等二维码弹出
-const SCAN_WAIT_MS = 150000;   // 等用户扫码确认
+const QR_WAIT_MS = Number(process.env.QR_WAIT_MS) || 35000; // 等二维码弹出
+const SCAN_WAIT_MS = Number(process.env.SCAN_WAIT_MS) || 150000; // 等用户扫码确认
 const POLL_MS = 2500;
 
 if (!SUPABASE_URL || !SERVICE_KEY) {
@@ -217,3 +217,4 @@ async function main() {
 }
 
 main();
+

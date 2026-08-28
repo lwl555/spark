@@ -1,6 +1,6 @@
 ﻿# 抖音扫码登录：GitHub Actions 真浏览器（免费额度，无需服务器）
-# 触发方式：用户点网站“绑定抖音号”→ login_requests 排队 → 本任务处理；
-#           也可手动 gh workflow run spark-login.yml --repo lwl555/spark
+# 触发：用户点网站“绑定抖音号”→ login_requests 排队 → 本任务处理；
+#       也可手动：gh workflow run spark-login.yml -R lwl555/spark -f user_id=xxx
 name: spark-login
 
 on:
@@ -11,14 +11,34 @@ on:
         required: false
         default: ""
   schedule:
-    - cron: "*/2 * * * *"
+    - cron: "*/3 * * * *"
 
 concurrency:
   group: spark-login
   cancel-in-progress: false
 
 jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      has_request: ${{ steps.check.outputs.has }}
+    steps:
+      - name: 检查是否有排队登录请求（无则 10 秒内结束，省额度）
+        id: check
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          TARGET_USER_ID: ${{ inputs.user_id }}
+        run: |
+          if [ -n "$TARGET_USER_ID" ]; then HAS=1; else
+            HAS=$(curl -sS "$SUPABASE_URL/rest/v1/login_requests?status=eq.pending&select=id&limit=1" \
+              -H "apikey: $SUPABASE_SERVICE_KEY" -H "Authorization: Bearer $SUPABASE_SERVICE_KEY" | grep -c '"id"' || true)
+          fi
+          echo "has=$HAS" >> "$GITHUB_OUTPUT"
+
   browser-login:
+    needs: check
+    if: needs.check.outputs.has_request == '1'
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
@@ -27,6 +47,12 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+
+      - name: 缓存 Chromium（加速启动）
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-chromium-${{ runner.os }}
 
       - name: 安装 Playwright 与 Chromium
         run: |
