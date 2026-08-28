@@ -38,3 +38,4 @@
 - `supabase/functions/` — Edge Functions 源码
 - `supabase/schema.sql` — 数据库建表脚本（控制台手动执行）
 - `app.js / index.html / style.css / config.js` — 网页控制台
+
