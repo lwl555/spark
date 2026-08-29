@@ -240,7 +240,7 @@ async function extractSelfInfo(page) {
 const VERIFY_WAIT_MS = Number(process.env.VERIFY_WAIT_MS) || 300000; // 等用户输入验证码
 const evalWithTimeout = (fn) => Promise.race([fn, new Promise((r) => setTimeout(() => r(null), 12000))]);
 
-// 找页面上的短信验证码输入框（必须同时出现"验证码"文案，避免误判手机号登录页）
+// 找页面上的短信验证码输入框，并读取验证弹窗的完整文案与按钮状态
 async function findVerifyInfo(page) {
   return page.evaluate(() => {
     const vis = (el) => {
@@ -249,21 +249,42 @@ async function findVerifyInfo(page) {
       const st = getComputedStyle(el);
       return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none";
     };
-    let input = null;
-    document.querySelectorAll("input").forEach((el) => {
-      if (input || !vis(el)) return;
-      const ph = (el.placeholder || "") + " " + (el.getAttribute("aria-label") || "");
-      if (/验证码/.test(ph)) input = el;
+    const findInput = () => {
+      let input = null;
+      document.querySelectorAll("input").forEach((el) => {
+        if (input || !vis(el)) return;
+        const ph = (el.placeholder || "") + " " + (el.getAttribute("aria-label") || "");
+        if (/验证码/.test(ph)) input = el;
+      });
+      return input;
+    };
+    const input = findInput();
+    if (!input) return { found: false, mobile: "", hint: "", buttons: [] };
+    // 找弹窗容器：从输入框向上找包含验证文案的最近容器
+    let container = input;
+    let best = null;
+    for (let up = 0; up < 8 && container; up++) {
+      const t = (container.innerText || "").replace(/\s+/g, " ").trim();
+      if (/验证码|安全验证|短信|手机/.test(t)) best = container;
+      container = container.parentElement;
+      if (best && container && container.querySelectorAll("input").length >= 3) break;
+    }
+    const root = best || document.body;
+    const containerText = (root.innerText || "").replace(/\s+/g, " ").slice(0, 400);
+    const buttons = [];
+    root.querySelectorAll("button").forEach((b) => {
+      if (!vis(b)) return;
+      const t = (b.innerText || "").trim();
+      if (t && t.length <= 12) buttons.push({ text: t, disabled: !!b.disabled });
     });
-    const text = (document.body.innerText || "").replace(/\s+/g, " ");
-    const m = text.match(/\d{3}\*{3,4}\d{3,4}/);
+    const m = containerText.match(/\d{3}\*{3,4}\d{3,4}/);
     const mobile = m ? m[0] : "";
-    const hasVerify = /短信验证|验证码|安全验证|账号验证/.test(text);
-    return { found: !!input && hasVerify, mobile, hasVerify, hint: text.slice(0, 220) };
-  }).catch(() => ({ found: false, mobile: "", hasVerify: false, hint: "" }));
+    const hasVerify = /短信验证|验证码|安全验证|账号验证/.test(containerText);
+    return { found: hasVerify, mobile, hint: containerText, buttons };
+  }).catch(() => ({ found: false, mobile: "", hint: "", buttons: [] }));
 }
 
-// 点击「获取验证码/重新发送」，确保短信已发出（仅在验证码输入框出现后调用）
+// 点击「获取验证码/重新发送」（只在验证码弹窗内找按钮，避免点到手机号登录页的按钮）
 async function clickResendCode(page) {
   return page.evaluate(() => {
     const vis = (el) => {
@@ -272,15 +293,41 @@ async function clickResendCode(page) {
       const st = getComputedStyle(el);
       return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none";
     };
-    let clicked = "";
-    document.querySelectorAll("button, a, span, div").forEach((el) => {
-      if (clicked || !vis(el)) return;
+    const findInput = () => {
+      let input = null;
+      document.querySelectorAll("input").forEach((el) => {
+        if (input || !vis(el)) return;
+        const ph = (el.placeholder || "") + " " + (el.getAttribute("aria-label") || "");
+        if (/验证码/.test(ph)) input = el;
+      });
+      return input;
+    };
+    const input = findInput();
+    if (!input) return "no_input";
+    let container = input;
+    let best = null;
+    for (let up = 0; up < 8 && container; up++) {
+      const t = (container.innerText || "").replace(/\s+/g, " ").trim();
+      if (/验证码|安全验证|短信|手机/.test(t)) best = container;
+      container = container.parentElement;
+      if (best && container && container.querySelectorAll("input").length >= 3) break;
+    }
+    const root = best || document;
+    let result = "";
+    root.querySelectorAll("button, a, span, div").forEach((el) => {
+      if (result || !vis(el)) return;
       const t = (el.innerText || "").trim();
-      if (!t || t.length > 10) return;
-      if (/获取验证码|重新发送|重新获取|发送验证码/.test(t)) { el.click(); clicked = t; }
+      if (!t || t.length > 12) return;
+      if (/获取短信验证码|获取验证码|发送验证码|重新发送|重新获取/.test(t)) {
+        const isBtn = el.tagName === "BUTTON" || el.tagName === "A";
+        const disabled = el.disabled === true || el.getAttribute("aria-disabled") === "true";
+        if (isBtn && disabled) { result = "disabled:" + t; return; }
+        el.click();
+        result = "clicked:" + t;
+      }
     });
-    return clicked;
-  }).catch(() => "");
+    return result || "no_button";
+  }).catch(() => "error");
 }
 
 // 把用户输入的验证码填入页面并点提交
@@ -344,8 +391,8 @@ async function main() {
 
     const token = "ghqr-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
     const qrcode = got.qrUri.replace(/^data:image\/png;base64,/, "");
-    // 老二维码（更早的 pending）作废，保证最新一条生效
-    await rest("PATCH", `login_states?user_id=eq.${userId}&status=eq.pending`, { status: "expired", updated_at: nowIso() }).catch(() => {});
+    // 老二维码（更早的 pending/verify_sms）作废，保证最新一条生效
+    await rest("PATCH", `login_states?user_id=eq.${userId}&status=in.(pending,verify_sms)`, { status: "expired", updated_at: nowIso() }).catch(() => {});
     const row = await rest("POST", "login_states", {
       user_id: userId,
       token,
@@ -368,6 +415,8 @@ async function main() {
     let lastInputSeen = 0;
     let codeReceived = false;      // 用户验证码是否已填入页面
     let codeFilledAt = 0;
+    let lastResendAt = 0;          // 上次尝试点「获取验证码」的时间
+    let lastSupersedeCheck = 0;    // 上次检查用户是否重新绑定
     const qrWithTimeout = () => Promise.race([
       findQrUri(got.page),
       new Promise((r) => setTimeout(() => r(""), 12000)),
@@ -393,6 +442,29 @@ async function main() {
         } catch (e) { log("二维码同步异常(忽略):", String(e).slice(0, 80)); }
       }
 
+      // 2.5) 用户重新点了绑定（出现新的 pending 请求）→ 本任务让位，取消自己让新任务立即开始
+      if (Date.now() - lastSupersedeCheck > 15000) {
+        lastSupersedeCheck = Date.now();
+        const newer = await rest("GET", `login_requests?user_id=eq.${userId}&status=eq.pending&limit=1&select=id`).catch(() => []);
+        if (newer?.length) {
+          log("用户重新点击了绑定，取消本任务（让新任务立即运行）");
+          await rest("PATCH", `login_requests?id=eq.${reqId}`, { status: "canceled", updated_at: nowIso() }).catch(() => {});
+          try {
+            const runId = process.env.GITHUB_RUN_ID;
+            const ghTok = process.env.GITHUB_TOKEN;
+            if (runId && ghTok) {
+              await fetch("https://api.github.com/repos/lwl555/spark/actions/runs/" + runId + "/cancel", {
+                method: "POST",
+                headers: { Authorization: "Bearer " + ghTok, "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "spark-worker" },
+                signal: AbortSignal.timeout(15000),
+              });
+              log("已请求取消本运行");
+            }
+          } catch (e) { log("取消自身运行失败(忽略):", String(e).slice(0, 80)); }
+          process.exit(0);
+        }
+      }
+
       // 3) 短信二次验证：抖音要求验证 → 通知网站；等用户输验证码 → 自动填入提交
       if (got.flow.verifyTriggered && !verifyAnnounced) {
         if (!verifySearchStart) verifySearchStart = Date.now();
@@ -401,11 +473,14 @@ async function main() {
           verifyAnnounced = true;
           verifyDeadline = Date.now() + VERIFY_WAIT_MS;
           lastInputSeen = Date.now();
+          await got.page.screenshot({ path: "verify-modal.png" }).catch(() => {});
+          log("验证弹窗按钮:", JSON.stringify(info.buttons));
           const sent = await clickResendCode(got.page).catch(() => "");
-          if (sent) log("已点击「" + sent + "」确保验证码已发送");
-          // 从页面文字里截取"验证码"附近的提示，避免把整页导航文字带进网站
+          log("发送验证码按钮状态:", sent || "无");
+          lastResendAt = Date.now();
+          // 截取弹窗里"验证码"附近的提示文案（含手机号等信息）
           const kIdx = (info.hint || "").indexOf("验证码");
-          const snippet = kIdx >= 0 ? info.hint.slice(Math.max(0, kIdx - 40), kIdx + 80) : (info.hint || "").slice(0, 120);
+          const snippet = kIdx >= 0 ? info.hint.slice(Math.max(0, kIdx - 60), kIdx + 120) : (info.hint || "").slice(0, 200);
           await rest("PATCH", `login_states?id=eq.${stateId}`, {
             status: "verify_sms",
             mobile: info.mobile || null,
@@ -433,6 +508,13 @@ async function main() {
           lastInputSeen = 0;
           await rest("PATCH", `login_states?id=eq.${stateId}`, { status: "pending", sms_code: null, updated_at: nowIso() }).catch(() => {});
           continue;
+        }
+        // 弹窗按钮若仍显示「获取验证码」且可点（短信还没发出），每 10 秒重试
+        if (Date.now() - lastResendAt > 10000) {
+          lastResendAt = Date.now();
+          const res = await clickResendCode(got.page).catch(() => "");
+          if (res && res.startsWith("clicked")) log("再次点击发送验证码:", res);
+          else if (res && res.startsWith("disabled")) log("验证码按钮倒计时中（短信可能已发送）:", res);
         }
         const rows = await rest("GET", `login_states?id=eq.${stateId}&select=sms_code`).catch(() => []);
         const code = (rows?.[0]?.sms_code || "").trim();
