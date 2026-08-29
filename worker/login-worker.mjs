@@ -11,7 +11,7 @@ const SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "";
 const TARGET_USER_ID = (process.env.TARGET_USER_ID || "").trim();
 
 const QR_WAIT_MS = Number(process.env.QR_WAIT_MS) || 35000; // 等二维码弹出
-const SCAN_WAIT_MS = Number(process.env.SCAN_WAIT_MS) || 300000; // 等用户扫码确认（二维码会自动刷新续期）
+const SCAN_WAIT_MS = Number(process.env.SCAN_WAIT_MS) || 480000; // 等用户扫码确认（二维码会自动刷新续期）
 const POLL_MS = 2500;
 
 if (!SUPABASE_URL || !SERVICE_KEY) {
@@ -31,6 +31,7 @@ async function rest(method, path, body) {
       Prefer: "return=representation",
     },
     body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(15000),
   });
   const txt = await res.text();
   let data = null;
@@ -262,21 +263,30 @@ async function main() {
     let cookiesMap = null;
     let lastQrCheck = 0;
     let shownQr = qrcode;
+    const qrWithTimeout = () => Promise.race([
+      findQrUri(got.page),
+      new Promise((r) => setTimeout(() => r(""), 12000)),
+    ]);
     while (Date.now() < scanDeadline) {
-      if (Date.now() - lastQrCheck > 5000) {
-        lastQrCheck = Date.now();
-        const cur = await findQrUri(got.page).catch(() => "");
-        if (cur && cur !== got.qrUri) {
-          got.qrUri = cur;
-          shownQr = cur.replace(/^data:image\/png;base64,/, "");
-          await rest("PATCH", `login_states?id=eq.${stateId}`, { qrcode: shownQr, updated_at: nowIso() }).catch(() => {});
-          log("二维码已自动换新并同步到网站");
-        }
-      }
+      // 1) 先查登录 cookie（抖音确认登录后立即写入）
       const cookies = await got.context.cookies().catch(() => []);
       const map = {};
       for (const c of cookies) map[c.name] = c.value;
       if (map.sessionid || map.sid_tt) { cookiesMap = map; break; }
+
+      // 2) 顺带同步抖音自动换新的二维码（带超时，失败不阻塞主循环）
+      if (Date.now() - lastQrCheck > 5000) {
+        lastQrCheck = Date.now();
+        try {
+          const cur = await qrWithTimeout();
+          if (cur && cur !== got.qrUri) {
+            got.qrUri = cur;
+            shownQr = cur.replace(/^data:image\/png;base64,/, "");
+            await rest("PATCH", `login_states?id=eq.${stateId}`, { qrcode: shownQr, updated_at: nowIso() }).catch(() => {});
+            log("二维码已自动换新并同步到网站");
+          }
+        } catch (e) { log("二维码同步异常(忽略):", String(e).slice(0, 80)); }
+      }
       await new Promise((r) => setTimeout(r, POLL_MS));
     }
 
@@ -285,7 +295,7 @@ async function main() {
       let diag = "等待扫码超时";
       try {
         const url = got.page.url();
-        const qrStill = await findQrUri(got.page).catch(() => "");
+        const qrStill = await Promise.race([findQrUri(got.page), new Promise((r) => setTimeout(() => r(""), 12000))]).catch(() => "");
         const cookies = await got.context.cookies().catch(() => []);
         const names = cookies.map((x) => x.name).slice(0, 12).join(",");
         const modalText = (await got.page.evaluate(() => (document.body.innerText || "").replace(/\n+/g, "|").slice(0, 150)).catch(() => ""));
