@@ -75,36 +75,85 @@ async function failRequest(reqId, error) {
 // 在页面里查找当前登录二维码 dataURI（抖音会自动换新二维码，需反复查）
 async function findQrUri(page) {
   return page.evaluate(() => {
-    const imgs = [...document.querySelectorAll("img")];
-    for (const im of imgs) {
-      try {
-        const w = im.naturalWidth, h = im.naturalHeight;
-        if (!(w >= 180 && w <= 620 && h >= 180 && h <= 620)) continue; // 二维码边长范围
-        if (Math.abs(w - h) / Math.max(w, h) > 0.08) continue;          // 近似正方形
-        if (typeof im.src !== "string" || !im.src.startsWith("data:image/")) continue;
-        // 画到 canvas 上检查像素：二维码必须黑白对比明显，空白/纯色装饰图直接排除
-        const canvas = document.createElement("canvas");
-        canvas.width = w;
-        canvas.height = h;
-        const ctx = canvas.getContext("2d", { willReadFrequently: true });
-        if (!ctx) continue;
-        ctx.drawImage(im, 0, 0);
-        const data = ctx.getImageData(0, 0, w, h).data;
-        let min = 255, max = 0, dark = 0, total = 0;
-        for (let i = 0; i < data.length; i += 16) {
-          const v = (data[i] * 299 + data[i + 1] * 587 + data[i + 2] * 114) / 1000;
-          if (v < min) min = v;
-          if (v > max) max = v;
-          total++;
-          if (v < 128) dark++;
+    // 二维码判定：尺寸 + 黑白对比 + "三个角定位块"特征（1:1:3:1:1 黑白序列）
+    // 装饰图/空白图即使尺寸像素相近，也不会有定位块特征
+    const qrLike = (im) => {
+      const w = im.naturalWidth, h = im.naturalHeight;
+      if (!(w >= 180 && w <= 700 && h >= 180 && h <= 700)) return false;   // 边长范围
+      if (Math.abs(w - h) / Math.max(w, h) > 0.08) return false;           // 近似正方形
+      if (typeof im.src !== "string" || !im.src.startsWith("data:image/")) return false;
+      const canvas = document.createElement("canvas");
+      canvas.width = w; canvas.height = h;
+      const ctx = canvas.getContext("2d", { willReadFrequently: true });
+      if (!ctx) return false;
+      ctx.drawImage(im, 0, 0);
+      const px = ctx.getImageData(0, 0, w, h).data;
+      const gray = (x, y) => (px[(y * w + x) * 4] * 299 + px[(y * w + x) * 4 + 1] * 587 + px[(y * w + x) * 4 + 2] * 114) / 1000;
+      // 整体黑白对比（排除纯色/渐变装饰图）
+      let min = 255, max = 0, dark = 0, total = 0;
+      for (let y = 0; y < h; y += 4) for (let x = 0; x < w; x += 4) {
+        const v = gray(x, y); total++;
+        if (v < 128) dark++;
+        if (v < min) min = v;
+        if (v > max) max = v;
+      }
+      if (max - min <= 60 || dark / total <= 0.05 || dark / total >= 0.95) return false;
+      // 定位块扫描：沿行/列找 1:1:3:1:1 黑白序列（二维码三处定位块的独有特征）
+      const countPattern = (vertical) => {
+        const lines = vertical ? h : w;   // 扫描线数量
+        const span = vertical ? w : h;    // 每条线的长度
+        let hits = 0;
+        for (let li = 0; li < lines; li += 2) {
+          const runs = [];
+          let cur = (vertical ? gray(li, 0) : gray(0, li)) < 128, len = 0;
+          for (let oi = 0; oi < span; oi++) {
+            const d = (vertical ? gray(li, oi) : gray(oi, li)) < 128;
+            if (d === cur) len++;
+            else { runs.push({ d: cur, len }); cur = d; len = 1; }
+          }
+          runs.push({ d: cur, len });
+          for (let i = 0; i + 4 < runs.length; i++) {
+            const a = runs[i], b = runs[i + 1], c = runs[i + 2], d = runs[i + 3], e = runs[i + 4];
+            if (!a.d || !c.d || !e.d || b.d || d.d) continue;
+            const unit = (a.len + b.len + c.len + d.len + e.len) / 7;
+            if (unit < 2) continue;
+            if (Math.abs(a.len - unit) <= 0.7 * unit && Math.abs(b.len - unit) <= 0.7 * unit &&
+                Math.abs(c.len - 3 * unit) <= 0.7 * unit && Math.abs(d.len - unit) <= 0.7 * unit &&
+                Math.abs(e.len - unit) <= 0.7 * unit) hits++;
+          }
         }
-        if (max - min > 60 && dark / total > 0.05 && dark / total < 0.95) return im.src;
-      } catch { /* 跳过无法读取的图片 */ }
+        return hits;
+      };
+      return countPattern(false) >= 20 && countPattern(true) >= 20;
+    };
+
+    // 优先在「扫码登录」弹窗容器里找，找不到再全页找
+    let container = null;
+    try {
+      const xp = document.evaluate("//*[contains(text(),'扫码登录')]", document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+      for (let i = 0; i < xp.snapshotLength; i++) {
+        let el = xp.snapshotItem(i);
+        if (el && el.nodeType !== 1) el = el.parentElement;
+        for (let up = 0; up < 8 && el; up++) {
+          if (el.querySelectorAll && el.querySelectorAll("img").length) { container = el; break; }
+          el = el.parentElement;
+        }
+        if (container) break;
+      }
+    } catch { /* XPath 不可用时退回全页扫描 */ }
+    const root = container || document;
+    const imgs = [];
+    root.querySelectorAll("img").forEach((im) => {
+      if (im.dataset.__qrScanned) return;
+      im.dataset.__qrScanned = "1";
+      imgs.push(im);
+    });
+    for (const im of imgs) {
+      try { if (qrLike(im)) return im.src; } catch { /* 跳过无法读取的图片 */ }
     }
     return "";
   }).catch(() => "");
 }
-
 async function openBrowserAndGetQr() {
   const browser = await chromium.launch({
     headless: false,
