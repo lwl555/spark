@@ -143,11 +143,7 @@ async function findQrUri(page) {
     } catch { /* XPath 不可用时退回全页扫描 */ }
     const root = container || document;
     const imgs = [];
-    root.querySelectorAll("img").forEach((im) => {
-      if (im.dataset.__qrScanned) return;
-      im.dataset.__qrScanned = "1";
-      imgs.push(im);
-    });
+    root.querySelectorAll("img").forEach((im) => imgs.push(im));
     for (const im of imgs) {
       try { if (qrLike(im)) return im.src; } catch { /* 跳过无法读取的图片 */ }
     }
