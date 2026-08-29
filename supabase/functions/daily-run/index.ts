@@ -1,13 +1,13 @@
 ﻿// 每日自动任务：刷新所有会话火花，并给即将熄灭的好友自动续火花
 // 触发方式：GitHub Actions 定时 / 用户打开网页时调用（幂等，有 24h 冷却）
 import { CookieJar, fetchSparkData, sendTextMessage } from "../_shared/protocol.ts";
-import { json, rest } from "../_shared/db.ts";
+import { handleOptions, json, rest } from "../_shared/db.ts";
 import { syncSparkToDb, getSettings } from "../_shared/sync.ts";
 
 const COOLDOWN_MS = 24 * 60 * 60 * 1000; // 同一好友 24h 内最多自动发一次
 
 Deno.serve(async (req: Request) => {
-  const opt = req.method === "OPTIONS" ? new Response("ok", { headers: { "Access-Control-Allow-Origin": "*" } }) : null;
+  const opt = handleOptions(req);
   if (opt) return opt;
   try {
     const sessions = await rest(
@@ -105,4 +105,5 @@ Deno.serve(async (req: Request) => {
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
+
 
