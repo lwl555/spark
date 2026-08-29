@@ -108,6 +108,14 @@
     <h2>用抖音 App 扫码绑定</h2>
     <p class="muted">首次绑定需等待登录环境启动（约 1-2 分钟），出现二维码后用抖音 App 扫一扫</p>
     <div id="qr-wrap" class="qr-wrap"><img id="qr-img" alt="二维码"></div>
+    <div id="qr-verify" class="qr-verify hidden">
+      <p id="qr-verify-tip" class="qr-verify-tip">抖音向手机号发送了短信验证码，请输入后完成绑定</p>
+      <div class="qr-verify-row">
+        <input id="qr-code-input" class="qr-code-input" inputmode="numeric" maxlength="6" placeholder="6位验证码" autocomplete="one-time-code">
+        <button id="qr-code-submit" class="btn primary">确认</button>
+      </div>
+      <p id="qr-verify-hint" class="muted"></p>
+    </div>
     <p id="qr-status" class="qr-status">等待扫码…</p>
     <button id="qr-cancel" class="btn ghost">取消</button>
   </div>

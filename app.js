@@ -6,6 +6,7 @@ const sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY)
 const $ = (id) => document.getElementById(id);
 let qrTimer = null;
 let currentUser = null;
+let currentVerifyStateId = null; // 短信验证对应的 login_states.id
 
 /* ---------------- 工具 ---------------- */
 function toast(text, kind) {
@@ -246,15 +247,39 @@ function showBanner(text) {
 $("bind-btn").addEventListener("click", startQr);
 $("qr-close").addEventListener("click", closeQr);
 $("qr-cancel").addEventListener("click", closeQr);
+$("qr-code-submit").addEventListener("click", submitVerifyCode);
 let qrStartTs = 0;
+function resetVerifyUi() {
+  $("qr-verify").classList.add("hidden");
+  $("qr-code-input").value = "";
+  $("qr-code-submit").disabled = false;
+  $("qr-code-submit").textContent = "确认";
+  currentVerifyStateId = null;
+}
+async function submitVerifyCode() {
+  const code = $("qr-code-input").value.trim();
+  if (!/^\d{4,8}$/.test(code)) { toast("请输入收到的短信验证码", "err"); return; }
+  if (!currentVerifyStateId) { toast("验证会话已失效，请重新绑定", "err"); return; }
+  try {
+    const { error } = await sb.from("login_states").update({ sms_code: code }).eq("id", currentVerifyStateId);
+    if (error) throw error;
+    $("qr-code-submit").disabled = true;
+    $("qr-code-submit").textContent = "已提交，等待验证…";
+    toast("验证码已提交，正在完成登录", "ok");
+  } catch (e) {
+    handleErr(e);
+  }
+}
 function showQr(b64, token) {
   $("qr-img").src = "data:image/png;base64," + b64;
   $("qr-img").classList.remove("hidden");
+  resetVerifyUi();
   $("qr-status").textContent = "用抖音 App 扫码并确认";
 }
 async function startQr() {
   try {
     qrStartTs = Date.now();
+    resetVerifyUi();
     const r = await fn("login-qr");
     $("qr-modal").classList.remove("hidden");
     clearInterval(qrTimer);
@@ -297,18 +322,35 @@ async function pollQr(token) {
       if (Date.now() - qrStartTs > 300000) {
         $("qr-status").textContent = "启动较慢，请再等一会儿，或关闭后重新点击绑定";
       }
+    } else if (r.status === "verify_sms") {
+      $("qr-img").classList.add("hidden");
+      $("qr-verify").classList.remove("hidden");
+      currentVerifyStateId = r.stateId || null;
+      $("qr-status").textContent = "抖音需要短信验证：";
+      $("qr-verify-tip").textContent = r.mobile
+        ? "验证码已发送至 " + r.mobile + "，请查收短信后输入"
+        : "验证码已发送到你的手机，请查收短信后输入";
+      $("qr-verify-hint").textContent = r.hint || "验证码几分钟内有效；没收到可稍等几秒，验证码会自动重发";
+      // 验证码填错时允许重新输入
+      if (/重新输入/.test(r.hint || "")) {
+        $("qr-code-submit").disabled = false;
+        $("qr-code-submit").textContent = "确认";
+      }
     } else if (r.status === "scanned_ok") {
       $("qr-status").textContent = "已扫码，正在完成绑定…";
     } else if (r.status === "expired") {
       clearInterval(qrTimer);
+      resetVerifyUi();
       $("qr-status").textContent = "二维码已过期，请重新点击绑定";
       toast("二维码已过期，请重新绑定", "err");
     } else if (r.status === "failed") {
       clearInterval(qrTimer);
+      resetVerifyUi();
       $("qr-status").textContent = "登录失败：" + (r.error || "请重新尝试");
       toast("登录失败，请重新绑定", "err");
     } else if (r.status === "canceled") {
       clearInterval(qrTimer);
+      resetVerifyUi();
       $("qr-status").textContent = "已取消，请重新点击绑定";
     } else if (r.status === "none") {
       // 尚无任务：保持当前提示，继续轮询
@@ -321,6 +363,7 @@ async function pollQr(token) {
 }
 function closeQr() {
   clearInterval(qrTimer);
+  resetVerifyUi();
   $("qr-modal").classList.add("hidden");
 }
 

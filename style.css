@@ -144,6 +144,11 @@ body {
 .qr-wrap { margin: 18px auto; width: 220px; height: 220px; background: #fff; border-radius: 14px; padding: 10px; display: flex; align-items: center; justify-content: center; }
 .qr-wrap img { width: 100%; height: 100%; object-fit: contain; }
 .qr-status { min-height: 22px; font-size: 14px; color: var(--muted); margin-bottom: 12px; }
+.qr-verify { margin: 14px auto 8px; }
+.qr-verify-tip { font-size: 14px; color: var(--text); margin-bottom: 10px; }
+.qr-verify-row { display: flex; gap: 8px; justify-content: center; }
+.qr-code-input { flex: 1; max-width: 150px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 10px; font-size: 18px; letter-spacing: 4px; text-align: center; background: var(--bg); color: var(--text); }
+.qr-code-input:focus { outline: none; border-color: var(--accent); }
 
 /* ---------- Toast ---------- */
 .toast {

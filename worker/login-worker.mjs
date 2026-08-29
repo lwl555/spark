@@ -2,7 +2,8 @@
 // 1) 认领 login_requests 里最早的一条 pending（或直接处理 TARGET_USER_ID）
 // 2) 有头 Chromium 打开 douyin.com，取二维码 dataURI 写入 login_states
 // 3) 轮询浏览器 cookie，出现 sessionid 即登录成功 → 完整 cookies 写回
-// 4) 超时未扫码 → 标记 expired/failed
+// 4) 抖音要求短信二次验证时 → 状态改为 verify_sms，前端让用户输验证码 → 自动填入完成登录
+// 5) 超时未扫码 → 标记 expired/failed
 import { chromium } from "playwright";
 import fs from "node:fs";
 
@@ -175,12 +176,18 @@ async function openBrowserAndGetQr() {
   });
   const page = await context.newPage();
   page.on("pageerror", (e) => log("页面错误(可忽略):", String(e).slice(0, 120)));
-  // 诊断：监听抖音扫码状态接口的返回
+  // 诊断：监听抖音扫码状态接口的返回；account_flow=verify 表示要短信二次验证
+  const loginFlow = { verifyTriggered: false, lastVerifyBody: "" };
   page.on("response", async (r) => {
     try {
       if (r.url().includes("check_qrconnect")) {
         const body = await r.text().catch(() => "");
         log("CHECK_QR 返回:", r.status(), body.slice(0, 160));
+        if (body.includes('"account_flow":"verify"')) {
+          loginFlow.verifyTriggered = true;
+          loginFlow.lastVerifyBody = body.slice(0, 600);
+          log("抖音要求二次安全验证（短信验证码）");
+        }
       }
     } catch { /* 忽略 */ }
   });
@@ -199,11 +206,11 @@ async function openBrowserAndGetQr() {
   if (!qrUri) {
     await page.screenshot({ path: "qr-fail.png" }).catch(() => {});
     log("未找到二维码（可能已自动登录或弹窗失败）");
-    return { browser, page, context, qrUri: "" };
+    return { browser, page, context, qrUri: "", flow: loginFlow };
   }
   await page.screenshot({ path: "qr.png" }).catch(() => {});
   log("二维码已生成");
-  return { browser, page, context, qrUri };
+  return { browser, page, context, qrUri, flow: loginFlow };
 }
 
 // 登录成功后尽量从页面数据里提取自己的 sec_uid / 昵称（尽力而为）
@@ -227,6 +234,97 @@ async function extractSelfInfo(page) {
   } catch {
     return { secUid: "", nickname: "" };
   }
+}
+
+// ---------- 短信二次验证（抖音扫码后要求短信验证码） ----------
+const VERIFY_WAIT_MS = Number(process.env.VERIFY_WAIT_MS) || 300000; // 等用户输入验证码
+const evalWithTimeout = (fn) => Promise.race([fn, new Promise((r) => setTimeout(() => r(null), 12000))]);
+
+// 找页面上的短信验证码输入框（必须同时出现"验证码"文案，避免误判手机号登录页）
+async function findVerifyInfo(page) {
+  return page.evaluate(() => {
+    const vis = (el) => {
+      if (!el || el.nodeType !== 1) return false;
+      const r = el.getBoundingClientRect();
+      const st = getComputedStyle(el);
+      return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none";
+    };
+    let input = null;
+    document.querySelectorAll("input").forEach((el) => {
+      if (input || !vis(el)) return;
+      const ph = (el.placeholder || "") + " " + (el.getAttribute("aria-label") || "");
+      if (/验证码/.test(ph)) input = el;
+    });
+    const text = (document.body.innerText || "").replace(/\s+/g, " ");
+    const m = text.match(/\d{3}\*{3,4}\d{3,4}/);
+    const mobile = m ? m[0] : "";
+    const hasVerify = /短信验证|验证码|安全验证|账号验证/.test(text);
+    return { found: !!input && hasVerify, mobile, hasVerify, hint: text.slice(0, 220) };
+  }).catch(() => ({ found: false, mobile: "", hasVerify: false, hint: "" }));
+}
+
+// 点击「获取验证码/重新发送」，确保短信已发出（仅在验证码输入框出现后调用）
+async function clickResendCode(page) {
+  return page.evaluate(() => {
+    const vis = (el) => {
+      if (!el || el.nodeType !== 1) return false;
+      const r = el.getBoundingClientRect();
+      const st = getComputedStyle(el);
+      return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none";
+    };
+    let clicked = "";
+    document.querySelectorAll("button, a, span, div").forEach((el) => {
+      if (clicked || !vis(el)) return;
+      const t = (el.innerText || "").trim();
+      if (!t || t.length > 10) return;
+      if (/获取验证码|重新发送|重新获取|发送验证码/.test(t)) { el.click(); clicked = t; }
+    });
+    return clicked;
+  }).catch(() => "");
+}
+
+// 把用户输入的验证码填入页面并点提交
+async function fillVerifyCode(page, code) {
+  return page.evaluate((c) => {
+    const vis = (el) => {
+      if (!el || el.nodeType !== 1) return false;
+      const r = el.getBoundingClientRect();
+      const st = getComputedStyle(el);
+      return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none";
+    };
+    const digits = String(c).replace(/\D/g, "").slice(0, 6);
+    const all = Array.from(document.querySelectorAll("input")).filter(vis);
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
+    let target = null;
+    const single = all.find((el) => /验证码/.test((el.placeholder || "") + " " + (el.getAttribute("aria-label") || "")));
+    if (single) {
+      target = single;
+      setter.call(target, digits);
+      target.dispatchEvent(new Event("input", { bubbles: true }));
+      target.dispatchEvent(new Event("change", { bubbles: true }));
+    } else {
+      // 也可能是 4-8 个单独格子
+      const boxes = all.filter((el) => Number(el.maxLength) === 1 && (el.inputMode || "").toLowerCase() !== "text");
+      if (boxes.length >= 4 && boxes.length <= 8) {
+        target = boxes[0];
+        for (let i = 0; i < boxes.length; i++) {
+          setter.call(boxes[i], digits[i] || "");
+          boxes[i].dispatchEvent(new Event("input", { bubbles: true }));
+        }
+      }
+    }
+    if (!target) return "no_input";
+    let btn = null;
+    document.querySelectorAll("button").forEach((b) => {
+      if (btn || !vis(b)) return;
+      const t = (b.innerText || "").trim();
+      if (!t || t.length > 8 || /获取|发送|重新|取消/.test(t)) return;
+      if (/提交|确定|确认|验证|完成|下一步/.test(t)) btn = b;
+    });
+    if (btn) { btn.click(); return "clicked:" + btn.innerText.trim(); }
+    target.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    return "filled_enter";
+  }, code).catch(() => "error");
 }
 
 // ---------- 3. 主流程 ----------
@@ -258,16 +356,23 @@ async function main() {
     const stateId = row?.[0]?.id;
     log("已写入二维码 login_states id=", stateId, "等待手机扫码…");
 
-    // 等待 sessionid 出现；期间若页面自动刷新了二维码，同步给网站
+    // 等待 sessionid 出现；期间若页面自动刷新了二维码，同步给网站；
+    // 抖音要求短信二次验证时，通知网站让用户输入验证码，再自动填入
     const scanDeadline = Date.now() + SCAN_WAIT_MS;
     let cookiesMap = null;
     let lastQrCheck = 0;
     let shownQr = qrcode;
+    let verifyAnnounced = false;   // 是否已通知网站"需要短信验证码"
+    let verifyDeadline = 0;
+    let verifySearchStart = 0;
+    let lastInputSeen = 0;
+    let codeReceived = false;      // 用户验证码是否已填入页面
+    let codeFilledAt = 0;
     const qrWithTimeout = () => Promise.race([
       findQrUri(got.page),
       new Promise((r) => setTimeout(() => r(""), 12000)),
     ]);
-    while (Date.now() < scanDeadline) {
+    while (Date.now() < (verifyAnnounced ? Math.max(scanDeadline, verifyDeadline) : scanDeadline)) {
       // 1) 先查登录 cookie（抖音确认登录后立即写入）
       const cookies = await got.context.cookies().catch(() => []);
       const map = {};
@@ -287,12 +392,74 @@ async function main() {
           }
         } catch (e) { log("二维码同步异常(忽略):", String(e).slice(0, 80)); }
       }
+
+      // 3) 短信二次验证：抖音要求验证 → 通知网站；等用户输验证码 → 自动填入提交
+      if (got.flow.verifyTriggered && !verifyAnnounced) {
+        if (!verifySearchStart) verifySearchStart = Date.now();
+        const info = await evalWithTimeout(findVerifyInfo(got.page));
+        if (info && info.found) {
+          verifyAnnounced = true;
+          verifyDeadline = Date.now() + VERIFY_WAIT_MS;
+          lastInputSeen = Date.now();
+          const sent = await clickResendCode(got.page).catch(() => "");
+          if (sent) log("已点击「" + sent + "」确保验证码已发送");
+          // 从页面文字里截取"验证码"附近的提示，避免把整页导航文字带进网站
+          const kIdx = (info.hint || "").indexOf("验证码");
+          const snippet = kIdx >= 0 ? info.hint.slice(Math.max(0, kIdx - 40), kIdx + 80) : (info.hint || "").slice(0, 120);
+          await rest("PATCH", `login_states?id=eq.${stateId}`, {
+            status: "verify_sms",
+            mobile: info.mobile || null,
+            verify_hint: snippet,
+            updated_at: nowIso(),
+          }).catch(() => {});
+          log("检测到短信验证 → 已通知网站，等待用户输入验证码");
+        } else if (Date.now() - verifySearchStart > 60000) {
+          const txt = await evalWithTimeout(got.page.evaluate(() => (document.body.innerText || "").replace(/\s+/g, " ").slice(0, 300))).catch(() => "");
+          await got.page.screenshot({ path: "verify-fail.png" }).catch(() => {});
+          log("验证码输入框未找到，页面文字:", txt, "| verify返回:", got.flow.lastVerifyBody.slice(0, 200));
+          verifySearchStart = Date.now();
+        }
+      }
+
+      if (verifyAnnounced && !codeReceived) {
+        // 输入框是否还在（防验证流程被页面刷新打断）
+        const info = await evalWithTimeout(findVerifyInfo(got.page));
+        if (info && info.found) lastInputSeen = Date.now();
+        else if (lastInputSeen && Date.now() - lastInputSeen > 45000) {
+          log("验证码输入框消失超过45秒，验证流程可能已重置，等待重新触发");
+          verifyAnnounced = false;
+          verifyDeadline = 0;
+          verifySearchStart = 0;
+          lastInputSeen = 0;
+          await rest("PATCH", `login_states?id=eq.${stateId}`, { status: "pending", sms_code: null, updated_at: nowIso() }).catch(() => {});
+          continue;
+        }
+        const rows = await rest("GET", `login_states?id=eq.${stateId}&select=sms_code`).catch(() => []);
+        const code = (rows?.[0]?.sms_code || "").trim();
+        if (code) {
+          const filled = await evalWithTimeout(fillVerifyCode(got.page, code));
+          log("已把验证码填入页面:", filled);
+          codeReceived = true;
+          codeFilledAt = Date.now();
+          await rest("PATCH", `login_states?id=eq.${stateId}`, { sms_code: null, updated_at: nowIso() }).catch(() => {});
+        }
+      }
+      // 验证码提交后 30 秒仍没登录成功 → 可能填错/超时，允许重新输入
+      if (codeReceived && Date.now() - codeFilledAt > 30000 && !cookiesMap) {
+        log("验证码提交后未成功，允许重新输入");
+        codeReceived = false;
+        await rest("PATCH", `login_states?id=eq.${stateId}`, {
+          verify_hint: "验证码不正确或已过期，请重新输入验证码",
+          updated_at: nowIso(),
+        }).catch(() => {});
+      }
+
       await new Promise((r) => setTimeout(r, POLL_MS));
     }
 
     if (!cookiesMap) {
       // 诊断信息：页面地址、当前二维码是否存在、cookie 名列表
-      let diag = "等待扫码超时";
+      let diag = verifyAnnounced ? "等待短信验证码超时" : "等待扫码超时";
       try {
         const url = got.page.url();
         const qrStill = await Promise.race([findQrUri(got.page), new Promise((r) => setTimeout(() => r(""), 12000))]).catch(() => "");
@@ -301,6 +468,7 @@ async function main() {
         const modalText = (await got.page.evaluate(() => (document.body.innerText || "").replace(/\n+/g, "|").slice(0, 150)).catch(() => ""));
         diag = `url=${url} qr=${qrStill ? "有" : "无"} cookies=[${names}] 页面文字=${modalText}`;
       } catch { /* 诊断失败忽略 */ }
+      if (verifyAnnounced) diag += " 验证码=" + (codeReceived ? "已提交" : "等待输入");
       log("诊断:", diag);
       await rest("PATCH", `login_states?id=eq.${stateId}`, { status: "expired", error: diag.slice(0, 300), updated_at: nowIso() }).catch(() => {});
       await failRequest(reqId, diag.slice(0, 200));

@@ -1,9 +1,9 @@
 ﻿// 轮询登录状态：二维码/扫码结果来自 GitHub Actions worker 写入的 login_states
-// 状态机：queued（排队中）→ qr_ready（二维码已生成）→ scanned_ok → bound
+// 状态机：queued（排队中）→ qr_ready（二维码已生成）→ verify_sms（短信二次验证）→ scanned_ok → bound
 import { CookieJar, fetchUserProfiles } from "../_shared/protocol.ts";
 import { handleOptions, json, rest, uidFromAuth } from "../_shared/db.ts";
 
-const QUEUE_TIMEOUT_MS = 8 * 60 * 1000; // 排队超过 8 分钟视为启动失败
+const QUEUE_TIMEOUT_MS = 15 * 60 * 1000; // 排队超过 15 分钟视为启动失败（含短信验证时间）
 
 Deno.serve(async (req: Request) => {
   const opt = handleOptions(req);
@@ -27,6 +27,15 @@ Deno.serve(async (req: Request) => {
 
     if (qr) {
       return json({ ok: true, status: "qr_ready", token: qr.token, qrcodeBase64: qr.qrcode || "" });
+    }
+
+    // 2.5) 短信二次验证：worker 检测到抖音要求短信验证码
+    const vs = await rest(
+      "GET",
+      `login_states?user_id=eq.${uid}&status=eq.verify_sms&order=updated_at.desc&limit=1&select=id,mobile,verify_hint`,
+    ).catch(() => []) as any[];
+    if (vs?.[0]) {
+      return json({ ok: true, status: "verify_sms", stateId: vs[0].id, mobile: vs[0].mobile || "", hint: vs[0].verify_hint || "" });
     }
 
     // 3) 没有进行中的二维码 → 按排队状态回答
