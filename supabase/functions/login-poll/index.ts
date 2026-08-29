@@ -26,6 +26,12 @@ Deno.serve(async (req: Request) => {
     const qr = qrs?.[0];
 
     if (qr) {
+      // 二维码超过 120 秒没更新说明 worker 已退出/被取消，作废并提示重新绑定
+      const qrAge = Date.now() - new Date(qr.updated_at || qr.created_at).getTime();
+      if (qrAge > 120000) {
+        await rest("PATCH", `login_states?id=eq.${qr.id}`, { status: "expired", updated_at: new Date().toISOString() }).catch(() => {});
+        return json({ ok: true, status: "expired" });
+      }
       return json({ ok: true, status: "qr_ready", token: qr.token, qrcodeBase64: qr.qrcode || "" });
     }
 

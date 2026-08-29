@@ -22,6 +22,11 @@ Deno.serve(async (req: Request) => {
       }
     }
 
+    // 1.5) 旧二维码超过 90 秒没更新 = 已过期（worker 可能被取消），作废避免复用
+    if (st && Date.now() - new Date(st.updated_at || st.created_at).getTime() > 90000) {
+      await rest("PATCH", `login_states?id=eq.${st.id}`, { status: "expired", updated_at: now }).catch(() => {});
+    }
+
     // 2) 该用户旧的排队请求全部作废，重新排队
     await rest("PATCH", `login_requests?user_id=eq.${uid}&status=eq.pending`, {
       status: "canceled",
