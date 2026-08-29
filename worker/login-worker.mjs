@@ -77,7 +77,29 @@ async function findQrUri(page) {
   return page.evaluate(() => {
     const imgs = [...document.querySelectorAll("img")];
     for (const im of imgs) {
-      if (im.naturalWidth >= 400 && typeof im.src === "string" && im.src.startsWith("data:image/png")) return im.src;
+      try {
+        const w = im.naturalWidth, h = im.naturalHeight;
+        if (!(w >= 180 && w <= 620 && h >= 180 && h <= 620)) continue; // 二维码边长范围
+        if (Math.abs(w - h) / Math.max(w, h) > 0.08) continue;          // 近似正方形
+        if (typeof im.src !== "string" || !im.src.startsWith("data:image/")) continue;
+        // 画到 canvas 上检查像素：二维码必须黑白对比明显，空白/纯色装饰图直接排除
+        const canvas = document.createElement("canvas");
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
+        if (!ctx) continue;
+        ctx.drawImage(im, 0, 0);
+        const data = ctx.getImageData(0, 0, w, h).data;
+        let min = 255, max = 0, dark = 0, total = 0;
+        for (let i = 0; i < data.length; i += 16) {
+          const v = (data[i] * 299 + data[i + 1] * 587 + data[i + 2] * 114) / 1000;
+          if (v < min) min = v;
+          if (v > max) max = v;
+          total++;
+          if (v < 128) dark++;
+        }
+        if (max - min > 60 && dark / total > 0.05 && dark / total < 0.95) return im.src;
+      } catch { /* 跳过无法读取的图片 */ }
     }
     return "";
   }).catch(() => "");
@@ -254,6 +276,7 @@ async function main() {
 }
 
 main();
+
 
 
 
