@@ -11,7 +11,7 @@ const SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY || "";
 const TARGET_USER_ID = (process.env.TARGET_USER_ID || "").trim();
 
 const QR_WAIT_MS = Number(process.env.QR_WAIT_MS) || 35000; // 等二维码弹出
-const SCAN_WAIT_MS = Number(process.env.SCAN_WAIT_MS) || 150000; // 等用户扫码确认
+const SCAN_WAIT_MS = Number(process.env.SCAN_WAIT_MS) || 300000; // 等用户扫码确认（二维码会自动刷新续期）
 const POLL_MS = 2500;
 
 if (!SUPABASE_URL || !SERVICE_KEY) {
@@ -72,6 +72,17 @@ async function failRequest(reqId, error) {
 }
 
 // ---------- 2. 启动浏览器拿二维码 ----------
+// 在页面里查找当前登录二维码 dataURI（抖音会自动换新二维码，需反复查）
+async function findQrUri(page) {
+  return page.evaluate(() => {
+    const imgs = [...document.querySelectorAll("img")];
+    for (const im of imgs) {
+      if (im.naturalWidth >= 400 && typeof im.src === "string" && im.src.startsWith("data:image/png")) return im.src;
+    }
+    return "";
+  }).catch(() => "");
+}
+
 async function openBrowserAndGetQr() {
   const browser = await chromium.launch({
     headless: false,
@@ -104,13 +115,7 @@ async function openBrowserAndGetQr() {
   const deadline = Date.now() + QR_WAIT_MS;
   let qrUri = "";
   while (Date.now() < deadline) {
-    qrUri = await page.evaluate(() => {
-      const imgs = [...document.querySelectorAll("img")];
-      for (const im of imgs) {
-        if (im.naturalWidth >= 400 && typeof im.src === "string" && im.src.startsWith("data:image/png")) return im.src;
-      }
-      return "";
-    }).catch(() => "");
+    qrUri = await findQrUri(page);
     if (qrUri) break;
     await new Promise((r) => setTimeout(r, 1000));
   }
@@ -176,10 +181,22 @@ async function main() {
     const stateId = row?.[0]?.id;
     log("已写入二维码 login_states id=", stateId, "等待手机扫码…");
 
-    // 等待 sessionid 出现
+    // 等待 sessionid 出现；期间若页面自动刷新了二维码，同步给网站
     const scanDeadline = Date.now() + SCAN_WAIT_MS;
     let cookiesMap = null;
+    let lastQrCheck = 0;
+    let shownQr = qrcode;
     while (Date.now() < scanDeadline) {
+      if (Date.now() - lastQrCheck > 5000) {
+        lastQrCheck = Date.now();
+        const cur = await findQrUri(got.page).catch(() => "");
+        if (cur && cur !== got.qrUri) {
+          got.qrUri = cur;
+          shownQr = cur.replace(/^data:image\/png;base64,/, "");
+          await rest("PATCH", `login_states?id=eq.${stateId}`, { qrcode: shownQr, updated_at: nowIso() }).catch(() => {});
+          log("二维码已自动换新并同步到网站");
+        }
+      }
       const cookies = await got.context.cookies().catch(() => []);
       const map = {};
       for (const c of cookies) map[c.name] = c.value;
@@ -217,4 +234,5 @@ async function main() {
 }
 
 main();
+
 
