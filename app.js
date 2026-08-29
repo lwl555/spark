@@ -274,6 +274,11 @@ async function pollQr(token) {
   try {
     const r = await fn("login-poll", { token });
     if (r.status === "qr_ready") {
+      const newSrc = "data:image/png;base64," + (r.qrcodeBase64 || "");
+      const cur = $("qr-img").src;
+      if (cur && cur.startsWith("data:image/png;base64,") && cur !== newSrc) {
+        toast("二维码已更新，请重新扫码", "err");
+      }
       showQr(r.qrcodeBase64, r.token);
       // 二维码刚出现时重置计时，用新 token 继续轮询
       if (qrTimer) clearInterval(qrTimer);
@@ -358,5 +363,6 @@ function onLogin(user) {
   // 打开页面自动跑一次检查（自动续火花）
   checkAll();
 }
+
 
 

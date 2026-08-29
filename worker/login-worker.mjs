@@ -107,6 +107,15 @@ async function openBrowserAndGetQr() {
   });
   const page = await context.newPage();
   page.on("pageerror", (e) => log("页面错误(可忽略):", String(e).slice(0, 120)));
+  // 诊断：监听抖音扫码状态接口的返回
+  page.on("response", async (r) => {
+    try {
+      if (r.url().includes("check_qrconnect")) {
+        const body = await r.text().catch(() => "");
+        log("CHECK_QR 返回:", r.status(), body.slice(0, 160));
+      }
+    } catch { /* 忽略 */ }
+  });
 
   log("打开 douyin.com …");
   await page.goto("https://www.douyin.com/", { waitUntil: "domcontentloaded", timeout: 60000 }).catch(() => {});
@@ -205,8 +214,19 @@ async function main() {
     }
 
     if (!cookiesMap) {
-      await rest("PATCH", `login_states?id=eq.${stateId}`, { status: "expired", updated_at: nowIso() }).catch(() => {});
-      await failRequest(reqId, "等待扫码超时");
+      // 诊断信息：页面地址、当前二维码是否存在、cookie 名列表
+      let diag = "等待扫码超时";
+      try {
+        const url = got.page.url();
+        const qrStill = await findQrUri(got.page).catch(() => "");
+        const cookies = await got.context.cookies().catch(() => []);
+        const names = cookies.map((x) => x.name).slice(0, 12).join(",");
+        const modalText = (await got.page.evaluate(() => (document.body.innerText || "").replace(/\n+/g, "|").slice(0, 150)).catch(() => ""));
+        diag = `url=${url} qr=${qrStill ? "有" : "无"} cookies=[${names}] 页面文字=${modalText}`;
+      } catch { /* 诊断失败忽略 */ }
+      log("诊断:", diag);
+      await rest("PATCH", `login_states?id=eq.${stateId}`, { status: "expired", error: diag.slice(0, 300), updated_at: nowIso() }).catch(() => {});
+      await failRequest(reqId, diag.slice(0, 200));
       log("退出：等待扫码超时");
       await browser.close().catch(() => {});
       process.exit(1);
@@ -234,5 +254,6 @@ async function main() {
 }
 
 main();
+
 
 
