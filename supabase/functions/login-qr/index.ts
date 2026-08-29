@@ -27,6 +27,17 @@ Deno.serve(async (req: Request) => {
       await rest("PATCH", `login_states?id=eq.${st.id}`, { status: "expired", updated_at: now }).catch(() => {});
     }
 
+    // 1.6) 已有 4 分钟内的排队/处理中请求 → 不重复排队（防止连续点击导致任务互相顶掉）
+    const recent = await rest(
+      "GET",
+      `login_requests?user_id=eq.${uid}&order=created_at.desc&limit=1&select=id,status,created_at`,
+    ) as any[];
+    const lastReq = recent?.[0];
+    if (lastReq && (lastReq.status === "pending" || lastReq.status === "processing") &&
+        Date.now() - new Date(lastReq.created_at).getTime() < 240000) {
+      return json({ ok: true, queued: true, message: "登录环境正在启动中，请稍候" });
+    }
+
     // 2) 该用户旧的排队请求全部作废，重新排队
     await rest("PATCH", `login_requests?user_id=eq.${uid}&status=eq.pending`, {
       status: "canceled",
