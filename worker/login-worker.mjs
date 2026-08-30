@@ -1,4 +1,4 @@
-﻿// 抖音扫码登录 Worker：在 GitHub Actions 上跑真浏览器完成登录
+// 抖音扫码登录 Worker：在 GitHub Actions 上跑真浏览器完成登录
 // 1) 认领 login_requests 里最早的一条 pending（或直接处理 TARGET_USER_ID）
 // 2) 有头 Chromium 打开 douyin.com，取二维码 dataURI 写入 login_states
 // 3) 轮询浏览器 cookie，出现 sessionid 即登录成功 → 完整 cookies 写回
@@ -277,7 +277,8 @@ async function findVerifyInfo(page) {
         container = container.parentElement;
         if (best && container && container.querySelectorAll("input").length >= 3) break;
       }
-      const root = best || document.body;
+      if (!best) return { found: false, stage: "none", mobile: "", hint: "", buttons: [] };
+      const root = best;
       const containerText = (root.innerText || "").replace(/\s+/g, " ").slice(0, 400);
       const buttons = [];
       root.querySelectorAll("button").forEach((b) => {
@@ -438,6 +439,74 @@ async function solveSlider(page) {
 }
 
 
+// 确保短信验证码真正发出：点「获取验证码」→ 处理滑块 → 确认进入发送状态（倒计时/已发送文案）
+async function ensureSmsSent(page) {
+  try {
+    const sentState = () => page.evaluate(() => {
+      const vis = (el) => {
+        if (!el || el.nodeType !== 1) return false;
+        const r = el.getBoundingClientRect();
+        const st = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none";
+      };
+      let countdown = "";
+      document.querySelectorAll("button").forEach((b) => {
+        if (countdown || !vis(b)) return;
+        const t = (b.innerText || "").trim();
+        if (/\d+\s*[s秒]/.test(t) || /重新发送|重新获取/.test(t)) countdown = t;
+      });
+      const bodyTxt = (document.body.innerText || "").replace(/\s+/g, " ");
+      const sentText = /验证码已发送|已发送验证码|发送成功|验证码已下发|短信已发送/.test(bodyTxt);
+      return { countdown, sentText };
+    }).catch(() => ({ countdown: "", sentText: false }));
+
+    // 1) 可能已经自动发送
+    let st = await sentState();
+    if (st.countdown || st.sentText) return { sent: true, reason: "already_sent" };
+
+    // 2) 点「获取验证码」（可点多次；抖音会弹滑块或进入倒计时）
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const clicked = await clickResendCode(page).catch(() => "");
+      log("尝试点击获取验证码:", clicked || "无");
+      if (clicked && clicked.startsWith("disabled")) {
+        st = await sentState();
+        if (st.countdown || st.sentText) return { sent: true, reason: "countdown_disabled" };
+      }
+      if (clicked && clicked.startsWith("clicked")) {
+        // 3) 处理可能出现的滑块（最多约 10 秒；失败自动重试）
+        for (let wi = 0; wi < 20; wi++) {
+          await new Promise((r) => setTimeout(r, 500));
+          const slider = await detectSlider(page);
+          if (slider.found) {
+            log("检测到滑块验证，尝试自动解决…");
+            await page.screenshot({ path: "slider-found.png" }).catch(() => {});
+            let result = await solveSlider(page);
+            log("滑块处理结果:", JSON.stringify(result));
+            if (!result.solved) {
+              for (let retry = 0; retry < 2 && !result.solved; retry++) {
+                await new Promise((r) => setTimeout(r, 1200));
+                result = await solveSlider(page);
+                log("滑块重试", retry + 1, ":", JSON.stringify(result));
+              }
+            }
+          }
+          st = await sentState();
+          if (st.countdown || st.sentText) return { sent: true, reason: "sent_after_click" };
+        }
+      } else {
+        // 没有可点的按钮：等 3 秒再看是否已自动发送
+        await new Promise((r) => setTimeout(r, 3000));
+        st = await sentState();
+        if (st.countdown || st.sentText) return { sent: true, reason: "auto_sent" };
+      }
+    }
+    const diag = await page.evaluate(() => (document.body.innerText || "").replace(/\s+/g, " ").slice(0, 300)).catch(() => "");
+    log("短信发送未确认，页面文字:", diag);
+    return { sent: false, reason: "send_not_confirmed" };
+  } catch (e) {
+    return { sent: false, reason: String(e).slice(0, 80) };
+  }
+}
 // 把用户输入的验证码填入页面并点提交
 async function fillVerifyCode(page, code) {
   return page.evaluate((c) => {
@@ -573,87 +642,78 @@ async function main() {
         }
       }
 
-      // 3) 短信二次验证：抖音要求验证 → 处理风险弹窗/滑块 → 通知网站 → 等用户输验证码 → 自动填入提交
+      // 3) 短信二次验证：抖音要求验证 → 先确保“获取验证码”被点击、短信真正发出 → 通知网站 → 等用户输验证码 → 自动填入提交
       if (got.flow.verifyTriggered && !verifyAnnounced) {
         if (!verifySearchStart) verifySearchStart = Date.now();
         const info = await evalWithTimeout(findVerifyInfo(got.page));
         if (info && info.found) {
-          if (info.stage === "risk_popup") {
-            // 风险弹窗：先点「获取验证码」→ 可能出现滑块 → 处理滑块 → 等短信发出
-            log("检测到风险验证弹窗（无输入框），尝试点击获取验证码...");
-            const sent = await clickResendCode(got.page).catch(() => "");
-            log("点击获取验证码:", sent || "无");
-            if (sent && sent.startsWith("clicked")) {
-              // 等滑块出现（最多 8 秒）
-              let sliderHandled = false;
-              for (let wi = 0; wi < 16; wi++) {
-                await new Promise(r => setTimeout(r, 500));
-                const slider = await detectSlider(got.page);
-                if (slider.found) {
-                  log("检测到滑块验证 iframe，尝试自动解决...");
-                  await got.page.screenshot({ path: "slider-found.png" }).catch(() => {});
-                  const result = await solveSlider(got.page);
-                  log("滑块处理结果:", JSON.stringify(result));
-                  sliderHandled = true;
-                  break;
-                }
-                // 检查是否已经跳到 sms_input 了（没出现滑块直接发了短信）
-                const checkInfo = await evalWithTimeout(findVerifyInfo(got.page));
-                if (checkInfo && checkInfo.stage === "sms_input") {
-                  log("滑块未出现，短信已直接发出");
-                  break;
-                }
-              }
-              if (!sliderHandled) {
-                // 再检查一次滑块（可能刚出现）
-                const slider2 = await detectSlider(got.page);
-                if (slider2.found) {
-                  log("滑块延迟出现，尝试解决...");
-                  const result = await solveSlider(got.page);
-                  log("滑块处理结果:", JSON.stringify(result));
-                }
-              }
-              // 等短信发出 + 输入框出现（最多 30 秒）
-              for (let wi = 0; wi < 30; wi++) {
-                await new Promise(r => setTimeout(r, 1000));
-                const checkInfo = await evalWithTimeout(findVerifyInfo(got.page));
-                if (checkInfo && checkInfo.stage === "sms_input") {
-                  log("验证码输入框已出现，短信已发出");
-                  break;
-                }
-              }
-            }
-          }
-          // 重新读取验证信息（可能是 sms_input 了）
-          const finalInfo = await evalWithTimeout(findVerifyInfo(got.page));
-          if (finalInfo && finalInfo.found && finalInfo.stage === "sms_input") {
+          log("验证弹窗阶段:", info.stage, "手机号:", info.mobile || "无");
+          // 无论哪个阶段，先点「获取验证码」并确认短信已发出，再通知网站（避免“提示已发送但实际没发”）
+          const sent = await ensureSmsSent(got.page);
+          log("短信发送确认:", JSON.stringify(sent));
+          if (sent.sent) {
             verifyAnnounced = true;
             verifyDeadline = Date.now() + VERIFY_WAIT_MS;
             lastInputSeen = Date.now();
             lastResendAt = Date.now();
+            const finalInfo = await evalWithTimeout(findVerifyInfo(got.page));
             await got.page.screenshot({ path: "verify-modal.png" }).catch(() => {});
-            log("验证弹窗按钮:", JSON.stringify(finalInfo.buttons));
-            const kIdx = (finalInfo.hint || "").indexOf("验证码");
-            const snippet = kIdx >= 0 ? finalInfo.hint.slice(Math.max(0, kIdx - 60), kIdx + 120) : (finalInfo.hint || "").slice(0, 200);
+            log("验证弹窗按钮:", JSON.stringify(finalInfo?.buttons || []));
+            const hint = finalInfo?.hint || info.hint || "";
+            const kIdx = hint.indexOf("验证码");
+            const snippet = kIdx >= 0 ? hint.slice(Math.max(0, kIdx - 60), kIdx + 120) : hint.slice(0, 200);
             await rest("PATCH", `login_states?id=eq.${stateId}`, {
               status: "verify_sms",
-              mobile: finalInfo.mobile || null,
+              mobile: finalInfo?.mobile || info.mobile || null,
               verify_hint: snippet,
               updated_at: nowIso(),
             }).catch(() => {});
-            log("检测到短信验证 → 已通知网站，等待用户输入验证码");
-          } else if (info.stage === "risk_popup") {
-            // 还在风险弹窗（获取验证码没成功或短信还没发出），继续等
-            log("风险弹窗阶段：等待短信发出...");
+            log("短信已发出，已通知网站等待用户输入验证码");
+          } else {
+            // 短信发送未确认：继续重试；超过 90 秒仍失败则明确报错，不误导用户
+            if (Date.now() - verifySearchStart > 90000) {
+              log("短信发送确认失败，结束任务:", sent.reason);
+              await rest("PATCH", `login_states?id=eq.${stateId}`, {
+                status: "failed",
+                error: "短信验证码发送失败（" + sent.reason + "），请重新绑定",
+                updated_at: nowIso(),
+              }).catch(() => {});
+              await failRequest(reqId, "短信发送失败: " + sent.reason);
+              log("退出：短信发送失败");
+              await browser.close().catch(() => {});
+              process.exit(1);
+            }
+            log("短信发送尚未确认（", sent.reason, "），继续重试…");
           }
         } else if (Date.now() - verifySearchStart > 60000) {
-          const txt = await evalWithTimeout(got.page.evaluate(() => (document.body.innerText || "").replace(/\s+/g, " ").slice(0, 300))).catch(() => "");
+          // 验证 UI 一直没找到：检查是否其实已登录（验证可能在手机上完成），或弹窗已关闭
+          const url = got.page.url();
+          const cookies = await got.context.cookies().catch(() => []);
+          const hasSession = cookies.some((x) => x.name === "sessionid" || x.name === "sid_tt");
+          if (hasSession) {
+            const map = {};
+            for (const x of cookies) map[x.name] = x.value;
+            cookiesMap = map;
+            log("检测到已登录（sessionid 已出现），跳过短信验证");
+            break;
+          }
+          const txt = await evalWithTimeout(got.page.evaluate(() => (document.body.innerText || "").replace(/\s+/g, " ").slice(0, 200))).catch(() => "");
+          log("验证 UI 未找到 url=", url, "text=", txt);
           await got.page.screenshot({ path: "verify-fail.png" }).catch(() => {});
-          log("验证码输入框未找到，页面文字:", txt, "| verify返回:", got.flow.lastVerifyBody.slice(0, 200));
+          if (Date.now() - verifySearchStart > 120000) {
+            await rest("PATCH", `login_states?id=eq.${stateId}`, {
+              status: "failed",
+              error: "验证弹窗已关闭或页面跳转，请重新点击绑定",
+              updated_at: nowIso(),
+            }).catch(() => {});
+            await failRequest(reqId, "验证弹窗已关闭或页面跳转");
+            log("退出：验证弹窗已关闭或页面跳转");
+            await browser.close().catch(() => {});
+            process.exit(1);
+          }
           verifySearchStart = Date.now();
         }
       }
-
       if (verifyAnnounced && !codeReceived) {
         // 输入框是否还在（防验证流程被页面刷新打断）
         const info = await evalWithTimeout(findVerifyInfo(got.page));
