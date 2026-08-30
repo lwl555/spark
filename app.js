@@ -1,4 +1,4 @@
-﻿"use strict";
+"use strict";
 /* 抖音火花助手 · 网页控制台 */
 const CFG = window.APP_CONFIG;
 const sb = window.supabase.createClient(CFG.SUPABASE_URL, CFG.SUPABASE_ANON_KEY);
@@ -321,6 +321,23 @@ async function pollQr(token) {
     } else if (r.status === "queued") {
       if (Date.now() - qrStartTs > 300000) {
         $("qr-status").textContent = "启动较慢，请再等一会儿，或关闭后重新点击绑定";
+      }
+    } else if (r.status === "verify_identity") {
+      currentVerifyStateId = r.stateId || null;
+      $("qr-status").textContent = "抖音要求身份验证：";
+      $("qr-verify").classList.remove("hidden");
+      $("qr-code-submit").disabled = false;
+      $("qr-code-submit").textContent = "确认";
+      if (r.qrcodeBase64) {
+        // 刷脸验证可能需要扫新二维码 → 显示
+        $("qr-img").classList.remove("hidden");
+        $("qr-img").src = "data:image/png;base64," + r.qrcodeBase64;
+        $("qr-verify-tip").textContent = "请在手机上完成验证：如页面出现新二维码，用抖音 App 扫一扫完成刷脸；若收到短信验证码，也可在下方输入";
+        $("qr-verify-hint").textContent = r.hint || "";
+      } else {
+        $("qr-img").classList.add("hidden");
+        $("qr-verify-tip").textContent = r.hint || "请在手机上按提示完成验证（刷脸或短信），完成后网页会自动继续";
+        $("qr-verify-hint").textContent = "若收不到短信，请在手机上选「刷脸验证」；如收到短信验证码，可在上方输入";
       }
     } else if (r.status === "verify_sms") {
       $("qr-img").classList.add("hidden");

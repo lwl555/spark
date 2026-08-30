@@ -1,4 +1,4 @@
-﻿-- ============================================================
+-- ============================================================
 -- 抖音火花助手 · 数据库表结构（在 Supabase Dashboard → SQL Editor 执行）
 -- 说明：sbp_ 部署令牌没有数据库写权限，建表需在控制台手动执行本文件
 -- 执行方式：Supabase 控制台 → SQL Editor → 粘贴全部 → Run
@@ -117,6 +117,9 @@ create policy "own settings" on user_settings
 -- 2026-08-29 新增：登录排队 + 二维码列（配合 GitHub Actions 真浏览器登录）
 -- ============================================================
 alter table login_states add column if not exists qrcode text;
+alter table login_states add column if not exists mobile text;          -- 二次验证：接收短信的手机号（打码）
+alter table login_states add column if not exists verify_hint text;     -- 二次验证：给用户看的提示文案
+alter table login_states add column if not exists sms_code text;        -- 用户在前端输入的短信验证码（worker 填入页面）
 
 -- 登录排队表：用户点「绑定抖音号」→ 排入队列 → Actions worker 认领处理
 create table if not exists login_requests (
@@ -136,3 +139,4 @@ create policy "own login requests" on login_requests
   for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
 create policy "own login states read" on login_states
   for select using (auth.uid() = user_id);
+

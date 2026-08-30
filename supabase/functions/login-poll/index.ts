@@ -1,4 +1,4 @@
-﻿// 轮询登录状态：二维码/扫码结果来自 GitHub Actions worker 写入的 login_states
+// 轮询登录状态：二维码/扫码结果来自 GitHub Actions worker 写入的 login_states
 // 状态机：queued（排队中）→ qr_ready（二维码已生成）→ verify_sms（短信二次验证）→ scanned_ok → bound
 import { CookieJar, fetchUserProfiles } from "../_shared/protocol.ts";
 import { handleOptions, json, rest, uidFromAuth } from "../_shared/db.ts";
@@ -35,13 +35,13 @@ Deno.serve(async (req: Request) => {
       return json({ ok: true, status: "qr_ready", token: qr.token, qrcodeBase64: qr.qrcode || "" });
     }
 
-    // 2.5) 短信二次验证：worker 检测到抖音要求短信验证码
+    // 2.5) 二次验证：worker 检测到抖音要求身份验证（刷脸/短信）或短信验证码
     const vs = await rest(
       "GET",
-      `login_states?user_id=eq.${uid}&status=eq.verify_sms&order=updated_at.desc&limit=1&select=id,mobile,verify_hint`,
+      `login_states?user_id=eq.${uid}&status=in.(verify_sms,verify_identity)&order=updated_at.desc&limit=1&select=id,mobile,verify_hint,status,qrcode`,
     ).catch(() => []) as any[];
     if (vs?.[0]) {
-      return json({ ok: true, status: "verify_sms", stateId: vs[0].id, mobile: vs[0].mobile || "", hint: vs[0].verify_hint || "" });
+      return json({ ok: true, status: vs[0].status, stateId: vs[0].id, mobile: vs[0].mobile || "", hint: vs[0].verify_hint || "", qrcodeBase64: vs[0].qrcode || "" });
     }
 
     // 3) 没有进行中的二维码 → 按排队状态回答

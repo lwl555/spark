@@ -238,6 +238,7 @@ async function extractSelfInfo(page) {
 
 // ---------- 短信二次验证（抖音扫码后要求短信验证码） ----------
 const VERIFY_WAIT_MS = Number(process.env.VERIFY_WAIT_MS) || 300000; // 等用户输入验证码
+const IDENTITY_WAIT_MS = Number(process.env.IDENTITY_WAIT_MS) || 480000; // 等用户在手机上完成身份验证（刷脸）
 const evalWithTimeout = (fn) => Promise.race([fn, new Promise((r) => setTimeout(() => r(null), 12000))]);
 
 // 找页面上的验证弹窗（含短信验证码、滑块等），读取完整文案与按钮状态
@@ -308,6 +309,41 @@ async function findVerifyInfo(page) {
   }).catch(() => ({ found: false, stage: "none", mobile: "", hint: "", buttons: [] }));
 }
 
+
+// 检测「身份验证」弹窗（抖音扫码后可能出现：接收短信验证码 / 发送短信验证 / 手机刷脸验证）
+// 返回各选项的点击坐标，worker 自动点「手机刷脸验证」，用户在手机上完成验证后登录自动继续
+async function findIdentityOptions(page) {
+  return page.evaluate(() => {
+    const vis = (el) => {
+      if (!el || el.nodeType !== 1) return false;
+      const r = el.getBoundingClientRect();
+      const st = getComputedStyle(el);
+      return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none";
+    };
+    const ownText = (el) =>
+      Array.from(el.childNodes).filter((n) => n.nodeType === 3).map((n) => n.textContent.trim()).join("");
+    const bodyTxt = (document.body.innerText || "").replace(/\s+/g, " ");
+    if (!/身份验证|接收短信验证码|发送短信验证|手机刷脸验证/.test(bodyTxt)) return { found: false, options: [] };
+    const pats = [/接收短信验证码/, /发送短信验证/, /手机刷脸验证/, /更多验证方式/];
+    const all = Array.from(document.querySelectorAll("body *"));
+    const options = [];
+    for (const el of all) {
+      if (!vis(el)) continue;
+      const own = ownText(el).replace(/\s+/g, "").trim();
+      if (!own || own.length > 10) continue;
+      if (!pats.some((p) => p.test(own))) continue;
+      let hasDeeper = false;
+      for (const d of el.querySelectorAll("*")) {
+        const dt = ownText(d).replace(/\s+/g, "").trim();
+        if (vis(d) && dt && dt.length <= 10 && pats.some((p) => p.test(dt))) { hasDeeper = true; break; }
+      }
+      if (hasDeeper) continue;
+      const r = el.getBoundingClientRect();
+      options.push({ text: own, x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) });
+    }
+    return { found: options.length >= 2, options };
+  }).catch(() => ({ found: false, options: [] }));
+}
 
 // 点击「获取验证码/重新发送」（支持风险弹窗 + 短信输入框两种场景）
 // 在页面里找“文字匹配的可见元素”的中心点（不限于 <button>，兼容 div/span 等自定义按钮）
@@ -630,7 +666,7 @@ async function main() {
     const token = "ghqr-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
     const qrcode = got.qrUri.replace(/^data:image\/png;base64,/, "");
     // 老二维码（更早的 pending/verify_sms）作废，保证最新一条生效
-    await rest("PATCH", `login_states?user_id=eq.${userId}&status=in.(pending,verify_sms)`, { status: "expired", updated_at: nowIso() }).catch(() => {});
+    await rest("PATCH", `login_states?user_id=eq.${userId}&status=in.(pending,verify_sms,verify_identity)`, { status: "expired", updated_at: nowIso() }).catch(() => {});
     const row = await rest("POST", "login_states", {
       user_id: userId,
       token,
@@ -655,6 +691,7 @@ async function main() {
     let codeFilledAt = 0;
     let lastResendAt = 0;          // 上次尝试点「获取验证码」的时间
     let lastSupersedeCheck = 0;    // 上次检查用户是否重新绑定
+    let verifyMode = "sms";        // 验证模式：sms=短信验证码，identity=身份验证（刷脸/短信）
     const qrWithTimeout = () => Promise.race([
       findQrUri(got.page),
       new Promise((r) => setTimeout(() => r(""), 12000)),
@@ -703,11 +740,40 @@ async function main() {
         }
       }
 
-      // 3) 短信二次验证：抖音要求验证 → 先确保“获取验证码”被点击、短信真正发出 → 通知网站 → 等用户输验证码 → 自动填入提交
+      // 3) 二次验证：抖音要求验证 → 先识别「身份验证」弹窗（接收短信/发送短信/手机刷脸 三选一）
+      //    优先自动点「手机刷脸验证」，用户只需在手机上完成刷脸，网页自动继续；短信输入作为兜底
       if (got.flow.verifyTriggered && !verifyAnnounced) {
         if (!verifySearchStart) verifySearchStart = Date.now();
-        const info = await evalWithTimeout(findVerifyInfo(got.page));
-        if (info && info.found) {
+        const idOpts = await evalWithTimeout(findIdentityOptions(got.page));
+        if (idOpts && idOpts.found) {
+          log("身份验证弹窗选项:", JSON.stringify(idOpts.options));
+          verifyMode = "identity";
+          const face = idOpts.options.find((o) => /刷脸/.test(o.text));
+          const smsOpt = idOpts.options.find((o) => /接收短信验证码|发送短信验证/.test(o.text));
+          const target = face || smsOpt || idOpts.options[0];
+          if (target) {
+            await got.page.mouse.click(target.x, target.y).catch(() => {});
+            log("已自动点击验证选项:", target.text);
+          }
+          await got.page.screenshot({ path: "identity-verify.png" }).catch(() => {});
+          verifyAnnounced = true;
+          verifyDeadline = Date.now() + IDENTITY_WAIT_MS;
+          lastInputSeen = Date.now();
+          lastResendAt = 0;
+          const hint = face
+            ? "抖音要求身份验证：已为你选择「手机刷脸验证」。请打开手机抖音 App 按提示完成刷脸，完成后网页会自动继续。若你收到了短信验证码，也可在下方输入。"
+            : "抖音要求身份验证：请在手机上按提示完成验证（刷脸或短信），完成后网页会自动继续。";
+          await rest("PATCH", `login_states?id=eq.${stateId}`, {
+            status: "verify_identity",
+            mobile: null,
+            verify_hint: hint,
+            updated_at: nowIso(),
+          }).catch(() => {});
+          log("已通知网站：等待用户在手机上完成身份验证");
+        } else {
+          verifyMode = "sms";
+          const info = await evalWithTimeout(findVerifyInfo(got.page));
+          if (info && info.found) {
           log("验证弹窗阶段:", info.stage, "手机号:", info.mobile || "无");
           // 无论哪个阶段，先点「获取验证码」并确认短信已发出，再通知网站（避免“提示已发送但实际没发”）
           const sent = await ensureSmsSent(got.page);
@@ -773,36 +839,53 @@ async function main() {
             process.exit(1);
           }
           verifySearchStart = Date.now();
+          }
         }
       }
       if (verifyAnnounced && !codeReceived) {
-        // 输入框是否还在（防验证流程被页面刷新打断）
-        const info = await evalWithTimeout(findVerifyInfo(got.page));
-        if (info && info.found) lastInputSeen = Date.now();
-        else if (lastInputSeen && Date.now() - lastInputSeen > 45000) {
-          log("验证码输入框消失超过45秒，验证流程可能已重置，等待重新触发");
-          verifyAnnounced = false;
-          verifyDeadline = 0;
-          verifySearchStart = 0;
-          lastInputSeen = 0;
-          await rest("PATCH", `login_states?id=eq.${stateId}`, { status: "pending", sms_code: null, updated_at: nowIso() }).catch(() => {});
-          continue;
+        if (verifyMode === "sms") {
+          // 输入框是否还在（防验证流程被页面刷新打断）——仅短信模式
+          const info = await evalWithTimeout(findVerifyInfo(got.page));
+          if (info && info.found) lastInputSeen = Date.now();
+          else if (lastInputSeen && Date.now() - lastInputSeen > 45000) {
+            log("验证码输入框消失超过45秒，验证流程可能已重置，等待重新触发");
+            verifyAnnounced = false;
+            verifyDeadline = 0;
+            verifySearchStart = 0;
+            lastInputSeen = 0;
+            await rest("PATCH", `login_states?id=eq.${stateId}`, { status: "pending", sms_code: null, updated_at: nowIso() }).catch(() => {});
+            continue;
+          }
+          // 弹窗按钮若仍显示「获取验证码」且可点（短信还没发出），每 10 秒重试
+          if (Date.now() - lastResendAt > 10000) {
+            lastResendAt = Date.now();
+            const res = await clickResendCode(got.page).catch(() => "");
+            if (res && res.startsWith("clicked")) log("再次点击发送验证码:", res);
+            else if (res && res.startsWith("disabled")) log("验证码按钮倒计时中（短信可能已发送）:", res);
+          }
+        } else {
+          // 身份验证模式：不自动重发短信，等用户在手机上完成刷脸/短信；页面刷新也不重置
+          lastInputSeen = Date.now();
         }
-        // 弹窗按钮若仍显示「获取验证码」且可点（短信还没发出），每 10 秒重试
-        if (Date.now() - lastResendAt > 10000) {
-          lastResendAt = Date.now();
-          const res = await clickResendCode(got.page).catch(() => "");
-          if (res && res.startsWith("clicked")) log("再次点击发送验证码:", res);
-          else if (res && res.startsWith("disabled")) log("验证码按钮倒计时中（短信可能已发送）:", res);
-        }
+        // 两种模式都兜底：用户在前端输入了验证码 → 填入页面
         const rows = await rest("GET", `login_states?id=eq.${stateId}&select=sms_code`).catch(() => []);
         const code = (rows?.[0]?.sms_code || "").trim();
         if (code) {
           const filled = await evalWithTimeout(fillVerifyCode(got.page, code));
           log("已把验证码填入页面:", filled);
-          codeReceived = true;
-          codeFilledAt = Date.now();
-          await rest("PATCH", `login_states?id=eq.${stateId}`, { sms_code: null, updated_at: nowIso() }).catch(() => {});
+          if (String(filled).startsWith("clicked:") || filled === "filled_enter") {
+            codeReceived = true;
+            codeFilledAt = Date.now();
+            await rest("PATCH", `login_states?id=eq.${stateId}`, { sms_code: null, updated_at: nowIso() }).catch(() => {});
+          } else if (filled === "no_input" && verifyMode === "identity") {
+            // 刷脸模式下页面上没有验证码输入框：提示用户走刷脸，或重选短信后重新绑定
+            log("身份验证模式：页面无验证码输入框，跳过短信提交");
+            await rest("PATCH", `login_states?id=eq.${stateId}`, {
+              sms_code: null,
+              verify_hint: "当前为刷脸验证，请先打开手机抖音 App 完成刷脸；若想改用短信，请重新点击绑定并选择「接收短信验证码」。",
+              updated_at: nowIso(),
+            }).catch(() => {});
+          }
         }
       }
       // 验证码提交后 30 秒仍没登录成功 → 可能填错/超时，允许重新输入
@@ -820,7 +903,7 @@ async function main() {
 
     if (!cookiesMap) {
       // 诊断信息：页面地址、当前二维码是否存在、cookie 名列表
-      let diag = verifyAnnounced ? "等待短信验证码超时" : "等待扫码超时";
+      let diag = verifyAnnounced ? (verifyMode === "identity" ? "等待身份验证超时（未在手机上完成刷脸/短信验证）" : "等待短信验证码超时") : "等待扫码超时";
       try {
         const url = got.page.url();
         const qrStill = await Promise.race([findQrUri(got.page), new Promise((r) => setTimeout(() => r(""), 12000))]).catch(() => "");
@@ -860,6 +943,9 @@ async function main() {
 }
 
 main();
+
+
+
 
 
 
