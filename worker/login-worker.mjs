@@ -258,12 +258,14 @@ async function findVerifyInfo(page) {
       });
       return input;
     };
+    const ownText = (el) =>
+      Array.from(el.childNodes).filter((n) => n.nodeType === 3).map((n) => n.textContent.trim()).join("");
     const findSendBtn = (rootEl) => {
       let btn = null;
-      rootEl.querySelectorAll("button").forEach((b) => {
+      rootEl.querySelectorAll("*").forEach((b) => {
         if (btn || !vis(b)) return;
-        const t = (b.innerText || "").trim();
-        if (/获取短信验证码|获取验证码|发送验证码|重新发送|重新获取/.test(t)) btn = b;
+        const t = (ownText(b) || (b.innerText || "")).trim();
+        if (t && t.length <= 12 && /获取短信验证码|获取验证码|发送验证码|重新发送|重新获取/.test(t)) btn = b;
       });
       return btn;
     };
@@ -281,10 +283,10 @@ async function findVerifyInfo(page) {
       const root = best;
       const containerText = (root.innerText || "").replace(/\s+/g, " ").slice(0, 400);
       const buttons = [];
-      root.querySelectorAll("button").forEach((b) => {
+      root.querySelectorAll("*").forEach((b) => {
         if (!vis(b)) return;
-        const t = (b.innerText || "").trim();
-        if (t && t.length <= 12) buttons.push({ text: t, disabled: !!b.disabled });
+        const t = (ownText(b) || "").replace(/\s+/g, " ").trim();
+        if (t && t.length <= 12) buttons.push({ text: t, disabled: b.disabled === true || b.getAttribute("aria-disabled") === "true" });
       });
       const m = containerText.match(/\d{3}\*{3,4}\d{3,4}/);
       return { found: true, stage: "sms_input", mobile: m ? m[0] : "", hint: containerText, buttons };
@@ -308,35 +310,80 @@ async function findVerifyInfo(page) {
 
 
 // 点击「获取验证码/重新发送」（支持风险弹窗 + 短信输入框两种场景）
-async function clickResendCode(page) {
-  return page.evaluate(() => {
+// 在页面里找“文字匹配的可见元素”的中心点（不限于 <button>，兼容 div/span 等自定义按钮）
+async function findClickableByText(page, patterns, maxLen = 12) {
+  return page.evaluate(({ pats, maxLen }) => {
     const vis = (el) => {
       if (!el || el.nodeType !== 1) return false;
       const r = el.getBoundingClientRect();
       const st = getComputedStyle(el);
       return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none";
     };
-    const allBtns = Array.from(document.querySelectorAll("button")).filter(vis);
-    for (const b of allBtns) {
-      const t = (b.innerText || "").trim();
-      if (!t || t.length > 12) continue;
-      if (/获取短信验证码|获取验证码|发送验证码|重新发送|重新获取/.test(t)) {
-        const disabled = b.disabled === true || b.getAttribute("aria-disabled") === "true";
-        if (disabled) return "disabled:" + t;
-        const rect = b.getBoundingClientRect();
-        const cx = Math.round(rect.left + rect.width / 2);
-        const cy = Math.round(rect.top + rect.height / 2);
-        const topEl = document.elementFromPoint(cx, cy);
-        if (topEl && (topEl === b || b.contains(topEl))) {
-          b.click();
-          return "clicked:" + t;
-        }
-        b.click();
-        return "clicked_force:" + t;
+    const ownText = (el) =>
+      Array.from(el.childNodes).filter((n) => n.nodeType === 3).map((n) => n.textContent.trim()).join("");
+    const all = Array.from(document.querySelectorAll("body *"));
+    for (const el of all) {
+      if (!vis(el)) continue;
+      const t = (el.innerText || "").trim();
+      if (!t || t.length > maxLen) continue;
+      const own = ownText(el);
+      if (!pats.some((p) => p.test(own || t))) continue;
+      // 优先最深的小元素：若子元素里还有匹配者，跳过当前容器
+      let hasDeeper = false;
+      for (const d of el.querySelectorAll("*")) {
+        const dt = (d.innerText || "").trim();
+        if (vis(d) && dt && dt.length <= maxLen && pats.some((p) => p.test(dt))) { hasDeeper = true; break; }
       }
+      if (hasDeeper) continue;
+      const r = el.getBoundingClientRect();
+      return {
+        text: t,
+        x: Math.round(r.left + r.width / 2),
+        y: Math.round(r.top + r.height / 2),
+        tag: el.tagName.toLowerCase(),
+        cls: String(el.className || "").slice(0, 80),
+        disabled: el.disabled === true || el.getAttribute("aria-disabled") === "true",
+      };
     }
+    return null;
+  }, { pats: patterns, maxLen }).catch(() => null);
+}
+
+// 点击「获取验证码/重新发送」（任意元素形态，用真实鼠标点击，兼容 div/span）
+async function clickResendCode(page) {
+  const btn = await findClickableByText(page, [/获取短信验证码|获取验证码|发送验证码|重新发送|重新获取/]);
+  if (!btn) {
+    // 诊断：列出页面上所有可见的小文本元素，确认按钮真实结构
+    const dump = await page.evaluate(() => {
+      const vis = (el) => {
+        if (!el || el.nodeType !== 1) return false;
+        const r = el.getBoundingClientRect();
+        const st = getComputedStyle(el);
+        return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none";
+      };
+      const ownText = (el) =>
+        Array.from(el.childNodes).filter((n) => n.nodeType === 3).map((n) => n.textContent.trim()).join("");
+      const out = [];
+      document.querySelectorAll("body *").forEach((el) => {
+        if (!vis(el)) return;
+        const own = ownText(el).replace(/\s+/g, " ");
+        if (!own || own.length > 14) return;
+        out.push(el.tagName.toLowerCase() + "|" + String(el.className || "").slice(0, 40) + "|" + own);
+      });
+      return out.slice(0, 80);
+    }).catch(() => []);
+    log("未找到「获取验证码」按钮，可见元素诊断:", JSON.stringify(dump));
     return "no_button";
-  }).catch(() => "error");
+  }
+  const top = await page.evaluate(({ x, y }) => {
+    const el = document.elementFromPoint(x, y);
+    if (!el) return "";
+    return el.tagName.toLowerCase() + "|" + String(el.className || "").slice(0, 40) + "|" + ((el.innerText || "").trim().slice(0, 12));
+  }, { x: btn.x, y: btn.y }).catch(() => "");
+  log("获取验证码按钮定位:", btn.tag + "|" + btn.cls + "|" + btn.text, "顶部元素:", top);
+  if (btn.disabled) return "disabled:" + btn.text;
+  await page.mouse.click(btn.x, btn.y);
+  return "clicked:" + btn.text;
 }
 
 // 检测滑块验证 iframe 是否出现
@@ -449,11 +496,14 @@ async function ensureSmsSent(page) {
         const st = getComputedStyle(el);
         return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none";
       };
+      const ownText = (el) =>
+        Array.from(el.childNodes).filter((n) => n.nodeType === 3).map((n) => n.textContent.trim()).join("");
       let countdown = "";
-      document.querySelectorAll("button").forEach((b) => {
+      document.querySelectorAll("body *").forEach((b) => {
         if (countdown || !vis(b)) return;
-        const t = (b.innerText || "").trim();
-        if (/\d+\s*[s秒]/.test(t) || /重新发送|重新获取/.test(t)) countdown = t;
+        const t = (ownText(b) || (b.innerText || "")).trim();
+        if (!t || t.length > 14) return;
+        if (/\d+\s*[s秒]/.test(t) || /重新发送|重新获取|已发送/.test(t)) countdown = t;
       });
       const bodyTxt = (document.body.innerText || "").replace(/\s+/g, " ");
       const sentText = /验证码已发送|已发送验证码|发送成功|验证码已下发|短信已发送/.test(bodyTxt);
@@ -509,13 +559,15 @@ async function ensureSmsSent(page) {
 }
 // 把用户输入的验证码填入页面并点提交
 async function fillVerifyCode(page, code) {
-  return page.evaluate((c) => {
+  const r = await page.evaluate((c) => {
     const vis = (el) => {
       if (!el || el.nodeType !== 1) return false;
       const r = el.getBoundingClientRect();
       const st = getComputedStyle(el);
       return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none";
     };
+    const ownText = (el) =>
+      Array.from(el.childNodes).filter((n) => n.nodeType === 3).map((n) => n.textContent.trim()).join("");
     const digits = String(c).replace(/\D/g, "").slice(0, 6);
     const all = Array.from(document.querySelectorAll("input")).filter(vis);
     const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, "value").set;
@@ -537,18 +589,27 @@ async function fillVerifyCode(page, code) {
         }
       }
     }
-    if (!target) return "no_input";
+    if (!target) return { filled: false, submit: null };
     let btn = null;
-    document.querySelectorAll("button").forEach((b) => {
+    document.querySelectorAll("body *").forEach((b) => {
       if (btn || !vis(b)) return;
-      const t = (b.innerText || "").trim();
-      if (!t || t.length > 8 || /获取|发送|重新|取消/.test(t)) return;
-      if (/提交|确定|确认|验证|完成|下一步/.test(t)) btn = b;
+      const t = (ownText(b) || (b.innerText || "")).trim();
+      if (!t || t.length > 8 || /获取|发送|重新|取消|验证码/.test(t)) return;
+    if (/提交|确定|确认|验证|完成|下一步/.test(t)) {
+        const br = b.getBoundingClientRect();
+        btn = { x: Math.round(br.left + br.width / 2), y: Math.round(br.top + br.height / 2), t };
+      }
     });
-    if (btn) { btn.click(); return "clicked:" + btn.innerText.trim(); }
-    target.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
-    return "filled_enter";
+    if (!btn) target.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    return { filled: true, submit: btn };
   }, code).catch(() => "error");
+  if (r === "error") return "error";
+  if (r.submit) {
+    await page.mouse.click(r.submit.x, r.submit.y);
+    return "clicked:" + r.submit.t;
+  }
+  if (r.filled) return "filled_enter";
+  return "no_input";
 }
 
 // ---------- 3. 主流程 ----------
