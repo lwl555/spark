@@ -240,7 +240,7 @@ async function extractSelfInfo(page) {
 const VERIFY_WAIT_MS = Number(process.env.VERIFY_WAIT_MS) || 300000; // 等用户输入验证码
 const evalWithTimeout = (fn) => Promise.race([fn, new Promise((r) => setTimeout(() => r(null), 12000))]);
 
-// 找页面上的短信验证码输入框，并读取验证弹窗的完整文案与按钮状态
+// 找页面上的验证弹窗（含短信验证码、滑块等），读取完整文案与按钮状态
 async function findVerifyInfo(page) {
   return page.evaluate(() => {
     const vis = (el) => {
@@ -258,33 +258,55 @@ async function findVerifyInfo(page) {
       });
       return input;
     };
+    const findSendBtn = (rootEl) => {
+      let btn = null;
+      rootEl.querySelectorAll("button").forEach((b) => {
+        if (btn || !vis(b)) return;
+        const t = (b.innerText || "").trim();
+        if (/获取短信验证码|获取验证码|发送验证码|重新发送|重新获取/.test(t)) btn = b;
+      });
+      return btn;
+    };
     const input = findInput();
-    if (!input) return { found: false, mobile: "", hint: "", buttons: [] };
-    // 找弹窗容器：从输入框向上找包含验证文案的最近容器
-    let container = input;
-    let best = null;
-    for (let up = 0; up < 8 && container; up++) {
-      const t = (container.innerText || "").replace(/\s+/g, " ").trim();
-      if (/验证码|安全验证|短信|手机/.test(t)) best = container;
-      container = container.parentElement;
-      if (best && container && container.querySelectorAll("input").length >= 3) break;
+    if (input) {
+      let container = input;
+      let best = null;
+      for (let up = 0; up < 8 && container; up++) {
+        const t = (container.innerText || "").replace(/\s+/g, " ").trim();
+        if (/验证码|安全验证|短信|手机/.test(t)) best = container;
+        container = container.parentElement;
+        if (best && container && container.querySelectorAll("input").length >= 3) break;
+      }
+      const root = best || document.body;
+      const containerText = (root.innerText || "").replace(/\s+/g, " ").slice(0, 400);
+      const buttons = [];
+      root.querySelectorAll("button").forEach((b) => {
+        if (!vis(b)) return;
+        const t = (b.innerText || "").trim();
+        if (t && t.length <= 12) buttons.push({ text: t, disabled: !!b.disabled });
+      });
+      const m = containerText.match(/\d{3}\*{3,4}\d{3,4}/);
+      return { found: true, stage: "sms_input", mobile: m ? m[0] : "", hint: containerText, buttons };
     }
-    const root = best || document.body;
-    const containerText = (root.innerText || "").replace(/\s+/g, " ").slice(0, 400);
-    const buttons = [];
-    root.querySelectorAll("button").forEach((b) => {
-      if (!vis(b)) return;
-      const t = (b.innerText || "").trim();
-      if (t && t.length <= 12) buttons.push({ text: t, disabled: !!b.disabled });
-    });
-    const m = containerText.match(/\d{3}\*{3,4}\d{3,4}/);
-    const mobile = m ? m[0] : "";
-    const hasVerify = /短信验证|验证码|安全验证|账号验证/.test(containerText);
-    return { found: hasVerify, mobile, hint: containerText, buttons };
-  }).catch(() => ({ found: false, mobile: "", hint: "", buttons: [] }));
+    const phoneMatch = (document.body.innerText || "").match(/(\d{3}\*{3,4}\d{3,4})/);
+    const hasRiskPopup = /安全验证|身份验证|风险验证|验证手机号|为保护/.test(document.body.innerText || "");
+    const sendBtn = findSendBtn(document.body);
+    if (phoneMatch || (hasRiskPopup && sendBtn)) {
+      const m = phoneMatch ? phoneMatch[1] : "";
+      const hint = (document.body.innerText || "").replace(/\s+/g, " ").slice(0, 400);
+      const buttons = [];
+      if (sendBtn) {
+        const t = (sendBtn.innerText || "").trim();
+        buttons.push({ text: t, disabled: !!(sendBtn.disabled || sendBtn.getAttribute("aria-disabled") === "true") });
+      }
+      return { found: true, stage: "risk_popup", mobile: m, hint, buttons };
+    }
+    return { found: false, stage: "none", mobile: "", hint: "", buttons: [] };
+  }).catch(() => ({ found: false, stage: "none", mobile: "", hint: "", buttons: [] }));
 }
 
-// 点击「获取验证码/重新发送」（只在验证码弹窗内找按钮，避免点到手机号登录页的按钮）
+
+// 点击「获取验证码/重新发送」（支持风险弹窗 + 短信输入框两种场景）
 async function clickResendCode(page) {
   return page.evaluate(() => {
     const vis = (el) => {
@@ -293,42 +315,128 @@ async function clickResendCode(page) {
       const st = getComputedStyle(el);
       return r.width > 0 && r.height > 0 && st.visibility !== "hidden" && st.display !== "none";
     };
-    const findInput = () => {
-      let input = null;
-      document.querySelectorAll("input").forEach((el) => {
-        if (input || !vis(el)) return;
-        const ph = (el.placeholder || "") + " " + (el.getAttribute("aria-label") || "");
-        if (/验证码/.test(ph)) input = el;
-      });
-      return input;
-    };
-    const input = findInput();
-    if (!input) return "no_input";
-    let container = input;
-    let best = null;
-    for (let up = 0; up < 8 && container; up++) {
-      const t = (container.innerText || "").replace(/\s+/g, " ").trim();
-      if (/验证码|安全验证|短信|手机/.test(t)) best = container;
-      container = container.parentElement;
-      if (best && container && container.querySelectorAll("input").length >= 3) break;
-    }
-    const root = best || document;
-    let result = "";
-    root.querySelectorAll("button, a, span, div").forEach((el) => {
-      if (result || !vis(el)) return;
-      const t = (el.innerText || "").trim();
-      if (!t || t.length > 12) return;
+    const allBtns = Array.from(document.querySelectorAll("button")).filter(vis);
+    for (const b of allBtns) {
+      const t = (b.innerText || "").trim();
+      if (!t || t.length > 12) continue;
       if (/获取短信验证码|获取验证码|发送验证码|重新发送|重新获取/.test(t)) {
-        const isBtn = el.tagName === "BUTTON" || el.tagName === "A";
-        const disabled = el.disabled === true || el.getAttribute("aria-disabled") === "true";
-        if (isBtn && disabled) { result = "disabled:" + t; return; }
-        el.click();
-        result = "clicked:" + t;
+        const disabled = b.disabled === true || b.getAttribute("aria-disabled") === "true";
+        if (disabled) return "disabled:" + t;
+        const rect = b.getBoundingClientRect();
+        const cx = Math.round(rect.left + rect.width / 2);
+        const cy = Math.round(rect.top + rect.height / 2);
+        const topEl = document.elementFromPoint(cx, cy);
+        if (topEl && (topEl === b || b.contains(topEl))) {
+          b.click();
+          return "clicked:" + t;
+        }
+        b.click();
+        return "clicked_force:" + t;
       }
-    });
-    return result || "no_button";
+    }
+    return "no_button";
   }).catch(() => "error");
 }
+
+// 检测滑块验证 iframe 是否出现
+async function detectSlider(page) {
+  try {
+    const frames = page.frames();
+    for (const f of frames) {
+      const url = f.url() || "";
+      if (/verifycenter|nocaptcha|rc-verify/.test(url)) {
+        return { found: true, url };
+      }
+    }
+    const mainFrame = page.mainFrame();
+    const hasIframe = await mainFrame.evaluate(() => {
+      const iframes = document.querySelectorAll("iframe");
+      for (const ifr of iframes) {
+        const src = ifr.src || "";
+        if (/verifycenter|nocaptcha|rc-verify/.test(src)) return true;
+      }
+      return false;
+    }).catch(() => false);
+    if (hasIframe) return { found: true, url: "iframe_in_dom" };
+    return { found: false };
+  } catch {
+    return { found: false };
+  }
+}
+
+// 尝试解决滑块验证（自动拖拽）
+async function solveSlider(page) {
+  try {
+    const frames = page.frames();
+    let sliderFrame = null;
+    for (const f of frames) {
+      const url = f.url() || "";
+      if (/verifycenter|nocaptcha|rc-verify/.test(url)) { sliderFrame = f; break; }
+    }
+    if (!sliderFrame) return { solved: false, reason: "no_frame" };
+    await sliderFrame.waitForLoadState("domcontentloaded").catch(() => {});
+    await new Promise(r => setTimeout(r, 1500));
+    const sliderInfo = await sliderFrame.evaluate(() => {
+      let track = null, handle = null;
+      const all = Array.from(document.querySelectorAll("div, span, button, a"));
+      for (const el of all) {
+        const r = el.getBoundingClientRect();
+        const cls = (el.className || "") + " " + (el.id || "");
+        if (!track && r.width > 200 && r.height > 20 && r.height < 60) {
+          if (/track|slide|bar|drag/.test(cls)) track = el;
+        }
+        if (!handle && r.width > 30 && r.width < 80 && r.height > 30 && r.height < 80) {
+          if (/btn|button|handle|drag|block|slider/.test(cls)) handle = el;
+        }
+      }
+      if (!track) {
+        const candidates = all.filter(d => {
+          const r = d.getBoundingClientRect();
+          return r.width > 200 && r.height > 20 && r.height < 60;
+        });
+        if (candidates.length) track = candidates[0];
+      }
+      if (!handle) {
+        const candidates = all.filter(d => {
+          const r = d.getBoundingClientRect();
+          return r.width > 30 && r.width < 70 && r.height > 30 && r.height < 70
+            && /btn|handle|drag|block|slider/.test((d.className || "") + " " + (d.id || ""));
+        });
+        if (candidates.length) handle = candidates[0];
+      }
+      if (!track || !handle) return { found: false };
+      const tr = track.getBoundingClientRect();
+      const hr = handle.getBoundingClientRect();
+      return {
+        found: true,
+        trackX: tr.left, trackY: tr.top + tr.height / 2, trackWidth: tr.width,
+        handleX: hr.left + hr.width / 2, handleY: hr.top + hr.height / 2, handleWidth: hr.width
+      };
+    }).catch(() => ({ found: false }));
+    if (!sliderInfo.found) return { solved: false, reason: "no_slider_elements" };
+    const distance = sliderInfo.trackWidth - sliderInfo.handleWidth - 5;
+    if (distance <= 0) return { solved: false, reason: "invalid_distance" };
+    await page.mouse.move(sliderInfo.handleX, sliderInfo.handleY);
+    await page.mouse.down();
+    const steps = 10;
+    for (let i = 1; i <= steps; i++) {
+      const x = sliderInfo.handleX + (distance * i / steps);
+      const y = sliderInfo.handleY + (Math.sin(i * 0.5) * 3);
+      await page.mouse.move(x, y);
+      await new Promise(r => setTimeout(r, 30));
+    }
+    await page.mouse.move(sliderInfo.handleX + distance + 2, sliderInfo.handleY);
+    await new Promise(r => setTimeout(r, 100));
+    await page.mouse.up();
+    await new Promise(r => setTimeout(r, 2000));
+    const after = await detectSlider(page);
+    if (!after.found) return { solved: true, reason: "slider_gone" };
+    return { solved: false, reason: "still_present" };
+  } catch (e) {
+    return { solved: false, reason: String(e).slice(0, 100) };
+  }
+}
+
 
 // 把用户输入的验证码填入页面并点提交
 async function fillVerifyCode(page, code) {
@@ -465,29 +573,79 @@ async function main() {
         }
       }
 
-      // 3) 短信二次验证：抖音要求验证 → 通知网站；等用户输验证码 → 自动填入提交
+      // 3) 短信二次验证：抖音要求验证 → 处理风险弹窗/滑块 → 通知网站 → 等用户输验证码 → 自动填入提交
       if (got.flow.verifyTriggered && !verifyAnnounced) {
         if (!verifySearchStart) verifySearchStart = Date.now();
         const info = await evalWithTimeout(findVerifyInfo(got.page));
         if (info && info.found) {
-          verifyAnnounced = true;
-          verifyDeadline = Date.now() + VERIFY_WAIT_MS;
-          lastInputSeen = Date.now();
-          await got.page.screenshot({ path: "verify-modal.png" }).catch(() => {});
-          log("验证弹窗按钮:", JSON.stringify(info.buttons));
-          const sent = await clickResendCode(got.page).catch(() => "");
-          log("发送验证码按钮状态:", sent || "无");
-          lastResendAt = Date.now();
-          // 截取弹窗里"验证码"附近的提示文案（含手机号等信息）
-          const kIdx = (info.hint || "").indexOf("验证码");
-          const snippet = kIdx >= 0 ? info.hint.slice(Math.max(0, kIdx - 60), kIdx + 120) : (info.hint || "").slice(0, 200);
-          await rest("PATCH", `login_states?id=eq.${stateId}`, {
-            status: "verify_sms",
-            mobile: info.mobile || null,
-            verify_hint: snippet,
-            updated_at: nowIso(),
-          }).catch(() => {});
-          log("检测到短信验证 → 已通知网站，等待用户输入验证码");
+          if (info.stage === "risk_popup") {
+            // 风险弹窗：先点「获取验证码」→ 可能出现滑块 → 处理滑块 → 等短信发出
+            log("检测到风险验证弹窗（无输入框），尝试点击获取验证码...");
+            const sent = await clickResendCode(got.page).catch(() => "");
+            log("点击获取验证码:", sent || "无");
+            if (sent && sent.startsWith("clicked")) {
+              // 等滑块出现（最多 8 秒）
+              let sliderHandled = false;
+              for (let wi = 0; wi < 16; wi++) {
+                await new Promise(r => setTimeout(r, 500));
+                const slider = await detectSlider(got.page);
+                if (slider.found) {
+                  log("检测到滑块验证 iframe，尝试自动解决...");
+                  await got.page.screenshot({ path: "slider-found.png" }).catch(() => {});
+                  const result = await solveSlider(got.page);
+                  log("滑块处理结果:", JSON.stringify(result));
+                  sliderHandled = true;
+                  break;
+                }
+                // 检查是否已经跳到 sms_input 了（没出现滑块直接发了短信）
+                const checkInfo = await evalWithTimeout(findVerifyInfo(got.page));
+                if (checkInfo && checkInfo.stage === "sms_input") {
+                  log("滑块未出现，短信已直接发出");
+                  break;
+                }
+              }
+              if (!sliderHandled) {
+                // 再检查一次滑块（可能刚出现）
+                const slider2 = await detectSlider(got.page);
+                if (slider2.found) {
+                  log("滑块延迟出现，尝试解决...");
+                  const result = await solveSlider(got.page);
+                  log("滑块处理结果:", JSON.stringify(result));
+                }
+              }
+              // 等短信发出 + 输入框出现（最多 30 秒）
+              for (let wi = 0; wi < 30; wi++) {
+                await new Promise(r => setTimeout(r, 1000));
+                const checkInfo = await evalWithTimeout(findVerifyInfo(got.page));
+                if (checkInfo && checkInfo.stage === "sms_input") {
+                  log("验证码输入框已出现，短信已发出");
+                  break;
+                }
+              }
+            }
+          }
+          // 重新读取验证信息（可能是 sms_input 了）
+          const finalInfo = await evalWithTimeout(findVerifyInfo(got.page));
+          if (finalInfo && finalInfo.found && finalInfo.stage === "sms_input") {
+            verifyAnnounced = true;
+            verifyDeadline = Date.now() + VERIFY_WAIT_MS;
+            lastInputSeen = Date.now();
+            lastResendAt = Date.now();
+            await got.page.screenshot({ path: "verify-modal.png" }).catch(() => {});
+            log("验证弹窗按钮:", JSON.stringify(finalInfo.buttons));
+            const kIdx = (finalInfo.hint || "").indexOf("验证码");
+            const snippet = kIdx >= 0 ? finalInfo.hint.slice(Math.max(0, kIdx - 60), kIdx + 120) : (finalInfo.hint || "").slice(0, 200);
+            await rest("PATCH", `login_states?id=eq.${stateId}`, {
+              status: "verify_sms",
+              mobile: finalInfo.mobile || null,
+              verify_hint: snippet,
+              updated_at: nowIso(),
+            }).catch(() => {});
+            log("检测到短信验证 → 已通知网站，等待用户输入验证码");
+          } else if (info.stage === "risk_popup") {
+            // 还在风险弹窗（获取验证码没成功或短信还没发出），继续等
+            log("风险弹窗阶段：等待短信发出...");
+          }
         } else if (Date.now() - verifySearchStart > 60000) {
           const txt = await evalWithTimeout(got.page.evaluate(() => (document.body.innerText || "").replace(/\s+/g, " ").slice(0, 300))).catch(() => "");
           await got.page.screenshot({ path: "verify-fail.png" }).catch(() => {});
