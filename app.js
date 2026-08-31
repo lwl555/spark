@@ -244,7 +244,7 @@ function showBanner(text) {
 }
 
 /* ---------------- 扫码绑定 ---------------- */
-$("bind-btn").addEventListener("click", startQr);
+$("bind-btn").addEventListener("click", showSmsLogin);
 $("qr-close").addEventListener("click", closeQr);
 $("qr-cancel").addEventListener("click", closeQr);
 $("qr-code-submit").addEventListener("click", submitVerifyCode);
@@ -276,6 +276,34 @@ function showQr(b64, token) {
   resetVerifyUi();
   $("qr-status").textContent = "用抖音 App 扫码并确认";
 }
+
+// 显示短信登录模态框
+function showSmsLogin() {
+  const modal = $("qr-modal");
+  if (!modal) return;
+  
+  modal.classList.remove("hidden");
+  
+  // 隐藏二维码，显示短信表单
+  const qrImg = $("qr-img");
+  const smsForm = $("sms-form");
+  const qrStatus = $("qr-status");
+  const qrVerify = $("qr-verify");
+  
+  if (qrImg) qrImg.style.display = "none";
+  if (smsForm) smsForm.style.display = "block";
+  if (qrVerify) qrVerify.classList.add("hidden");
+  if (qrStatus) qrStatus.textContent = "输入手机号登录";
+  
+  // 清空之前的输入
+  const phoneInput = $("sms-phone");
+  const codeInput = $("sms-code");
+  const verifyForm = $("sms-verify-form");
+  if (phoneInput) phoneInput.value = "";
+  if (codeInput) codeInput.value = "";
+  if (verifyForm) verifyForm.style.display = "none";
+}
+
 async function startQr() {
   try {
     qrStartTs = Date.now();
@@ -432,53 +460,7 @@ let smsPhone = '';
 let smsTimer = null;
 
 // 切换到短信登录模式
-function switchToSmsLogin() {
-  const modal = document.querySelector('.qr-modal');
-  if (!modal) return;
-  
-  // 隐藏二维码，显示短信输入
-  const qrImg = modal.querySelector('#qr-img');
-  const smsForm = modal.querySelector('#sms-form');
-  const qrStatus = modal.querySelector('#qr-status');
-  
-  if (qrImg) qrImg.style.display = 'none';
-  if (smsForm) smsForm.style.display = 'block';
-  if (qrStatus) qrStatus.textContent = '输入手机号登录';
-}
-
-// 发送验证码
-async function sendSmsCode() {
-  const phoneInput = document.querySelector('#sms-phone');
-  const phone = phoneInput?.value?.trim();
-  
-  if (!phone || !/^1[3-9]\d{9}$/.test(phone)) {
-    toast('请输入正确的手机号', 'err');
-    return;
-  }
-  
-  try {
-    const result = await fn('login-sms', { phone });
-    if (result.ok) {
-      smsPhone = phone;
-      toast(result.message || '验证码已发送', 'ok');
-      
-      // 开始倒计时
-      const sendBtn = document.querySelector('#sms-send-btn');
-      const verifyForm = document.querySelector('#sms-verify-form');
-      if (sendBtn) {
-        sendBtn.disabled = true;
-        let countdown = 60;
-        sendBtn.textContent = countdown + '秒后重发';
-        smsTimer = setInterval(() => {
-          countdown--;
-          if (countdown <= 0) {
-            clearInterval(smsTimer);
-            sendBtn.disabled = false;
-            sendBtn.textContent = '重新发送';
-          } else {
-            sendBtn.textContent = countdown + '秒后重发';
-          }
-        }, 1000);
+function // switchToSmsLogin 已被 showSmsLogin 替代, 1000);
       }
       if (verifyForm) verifyForm.style.display = 'block';
     } else {
