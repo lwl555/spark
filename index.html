@@ -116,7 +116,43 @@
       </div>
       <p id="qr-verify-hint" class="muted"></p>
     </div>
-    <p id="qr-status" class="qr-status">等待扫码…</p>
+    
+    <div id="sms-form" style="display:none; padding: 20px;">
+      <h3 style="margin-bottom: 15px; text-align: center;">📱 短信验证码登录</h3>
+      <p style="color: #666; font-size: 14px; margin-bottom: 20px; text-align: center;">
+        输入手机号，收到验证码后输入即可绑定<br>
+        <small>（比扫码更稳定，不需要电脑）</small>
+      </p>
+      
+      <div style="margin-bottom: 15px;">
+        <input type="tel" id="sms-phone" placeholder="请输入手机号" 
+               style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 16px;"
+               maxlength="11">
+      </div>
+      
+      <button id="sms-send-btn" onclick="sendSmsCode()" 
+              style="width: 100%; padding: 12px; background: #ff2442; color: white; border: none; border-radius: 8px; font-size: 16px; cursor: pointer;">
+        发送验证码
+      </button>
+      
+      <div id="sms-verify-form" style="display:none; margin-top: 20px;">
+        <div style="margin-bottom: 15px;">
+          <input type="text" id="sms-code" placeholder="请输入验证码" 
+                 style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px; font-size: 16px;"
+                 maxlength="6">
+        </div>
+        
+        <button onclick="verifySmsCode()" 
+                style="width: 100%; padding: 12px; background: #07c160; color: white; border: none; border-radius: 8px; font-size: 16px; cursor: pointer;">
+          登录绑定
+        </button>
+      </div>
+      
+      <p style="color: #999; font-size: 12px; margin-top: 15px; text-align: center;">
+        验证码有效期 60 秒，过期需重新发送
+      </p>
+    </div>
+  <p id="qr-status"等待扫码…</p>
     <button id="qr-cancel" class="btn ghost">取消</button>
   </div>
 </div>

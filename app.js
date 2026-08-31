@@ -426,3 +426,101 @@ function onLogin(user) {
 
 
 
+
+/* ---------------- 短信验证码登录（替代扫码，更稳定） ---------------- */
+let smsPhone = '';
+let smsTimer = null;
+
+// 切换到短信登录模式
+function switchToSmsLogin() {
+  const modal = document.querySelector('.qr-modal');
+  if (!modal) return;
+  
+  // 隐藏二维码，显示短信输入
+  const qrImg = modal.querySelector('#qr-img');
+  const smsForm = modal.querySelector('#sms-form');
+  const qrStatus = modal.querySelector('#qr-status');
+  
+  if (qrImg) qrImg.style.display = 'none';
+  if (smsForm) smsForm.style.display = 'block';
+  if (qrStatus) qrStatus.textContent = '输入手机号登录';
+}
+
+// 发送验证码
+async function sendSmsCode() {
+  const phoneInput = document.querySelector('#sms-phone');
+  const phone = phoneInput?.value?.trim();
+  
+  if (!phone || !/^1[3-9]\d{9}$/.test(phone)) {
+    toast('请输入正确的手机号', 'err');
+    return;
+  }
+  
+  try {
+    const result = await fn('login-sms', { phone });
+    if (result.ok) {
+      smsPhone = phone;
+      toast(result.message || '验证码已发送', 'ok');
+      
+      // 开始倒计时
+      const sendBtn = document.querySelector('#sms-send-btn');
+      const verifyForm = document.querySelector('#sms-verify-form');
+      if (sendBtn) {
+        sendBtn.disabled = true;
+        let countdown = 60;
+        sendBtn.textContent = countdown + '秒后重发';
+        smsTimer = setInterval(() => {
+          countdown--;
+          if (countdown <= 0) {
+            clearInterval(smsTimer);
+            sendBtn.disabled = false;
+            sendBtn.textContent = '重新发送';
+          } else {
+            sendBtn.textContent = countdown + '秒后重发';
+          }
+        }, 1000);
+      }
+      if (verifyForm) verifyForm.style.display = 'block';
+    } else {
+      toast(result.error || '发送失败', 'err');
+    }
+  } catch (e) {
+    toast('发送失败: ' + (e.message || e), 'err');
+  }
+}
+
+// 验证验证码
+async function verifySmsCode() {
+  const codeInput = document.querySelector('#sms-code');
+  const code = codeInput?.value?.trim();
+  
+  if (!code || !/^\d{4,6}$/.test(code)) {
+    toast('请输入正确的验证码', 'err');
+    return;
+  }
+  
+  try {
+    const result = await fn('verify-sms', { phone: smsPhone, code });
+    if (result.ok) {
+      toast('登录成功！', 'ok');
+      closeQr();
+      loadAll(); // 刷新数据
+    } else {
+      toast(result.error || '验证失败', 'err');
+    }
+  } catch (e) {
+    toast('验证失败: ' + (e.message || e), 'err');
+  }
+}
+
+// 绑定按钮点击时默认使用短信登录
+const originalBindClick = document.querySelector('#bind-btn')?.onclick;
+document.querySelector('#bind-btn')?.addEventListener('click', function(e) {
+  // 如果已经有扫码登录的 modal，先检查是否需要切换到短信模式
+  setTimeout(() => {
+    const modal = document.querySelector('.qr-modal');
+    if (modal && modal.style.display !== 'none') {
+      switchToSmsLogin();
+    }
+  }, 100);
+});

@@ -140,3 +140,22 @@ create policy "own login requests" on login_requests
 create policy "own login states read" on login_states
   for select using (auth.uid() = user_id);
 
+
+-- ============================================================
+-- 2026-08-31 新增：短信验证码登录状态（替代扫码登录，更稳定）
+-- ============================================================
+create table if not exists sms_login_states (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  phone text not null,                              -- 手机号
+  verify_token text,                                -- 抖音返回的验证 token
+  cookies_json jsonb not null default '{}'::jsonb,  -- 访问 douyin.com 获得的 cookies
+  status text not null default 'pending',           -- pending / completed / expired
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists idx_sms_login_user on sms_login_states(user_id);
+create index if not exists idx_sms_login_phone on sms_login_states(phone);
+alter table sms_login_states enable row level security;
+create policy "own sms login states" on sms_login_states
+  for all using (auth.uid() = user_id) with check (auth.uid() = user_id);
